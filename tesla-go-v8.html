@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>⚡ TESLA GO V8 — Console de Production</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@300;400;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --void: #08080c; --gold: #d4a843; --cyan: #00e5ff;
+  --green: #22c55e; --red: #ef4444; --amber: #f59e0b;
+  --purple: #a855f7; --blue: #3b82f6;
+  --surface: #0d0d14; --border: #1e1e2e;
+  --text: #f5f5f5; --muted: #555;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--void);color:var(--text);font-family:'Outfit',sans-serif;min-height:100vh;display:flex;flex-direction:column}
+
+/* HEADER */
+header{border-bottom:1px solid #0f2a0f;padding:14px 20px;display:flex;align-items:center;gap:14px;background:linear-gradient(90deg,#22c55e08,transparent)}
+.logo-main{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;letter-spacing:.08em;line-height:1}
+.logo-sub{font-size:.65rem;color:var(--muted)}
+.logo-sup{font-family:'Bebas Neue',sans-serif;font-size:.55rem;color:var(--green);letter-spacing:.3em}
+.sig{font-family:'Bebas Neue',sans-serif;font-size:.9rem;color:var(--gold);letter-spacing:.12em;margin-left:auto}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted);transition:background .3s;margin-left:8px}
+.dot.ok{background:var(--green);box-shadow:0 0 8px var(--green)}
+.dot.err{background:var(--red)}
+
+/* TABS */
+.tabs{display:flex;border-bottom:1px solid var(--border);background:#090910}
+.tab{font-family:'JetBrains Mono',monospace;font-size:.58rem;font-weight:700;letter-spacing:.15em;padding:10px 18px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:all .2s}
+.tab.active{color:var(--green);border-bottom-color:var(--green)}
+
+/* MAIN */
+main{flex:1;overflow:hidden}
+.view{display:none;height:calc(100vh - 95px);overflow-y:auto}
+.view.active{display:flex;flex-direction:column}
+
+/* ── VUE STUDIO ── */
+.studio{display:grid;grid-template-columns:1fr 320px;height:100%;overflow:hidden}
+
+/* LEFT */
+.studio-left{padding:20px;overflow-y:auto;border-right:1px solid var(--border)}
+.section-label{font-family:'JetBrains Mono',monospace;font-size:.55rem;color:var(--muted);letter-spacing:.2em;margin-bottom:8px;text-transform:uppercase}
+
+/* CLIP BUILDERS */
+.clip-builder{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--border);border-radius:3px;padding:12px;margin-bottom:8px;transition:border-left-color .2s}
+.clip-builder.active{border-left-color:var(--green)}
+.clip-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.clip-num{font-family:'Bebas Neue',sans-serif;font-size:.8rem;color:var(--green);min-width:28px}
+.clip-controls{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+textarea.clip-prompt{width:100%;background:#09090f;border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'Outfit',sans-serif;font-size:.82rem;padding:8px 10px;resize:vertical;min-height:56px;outline:none}
+textarea.clip-prompt:focus{border-color:var(--green)}
+select.clip-sel{background:#09090f;border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:.65rem;padding:6px 8px;outline:none;width:100%;cursor:pointer}
+select.clip-sel:focus{border-color:var(--green)}
+.btn-add-clip{width:100%;background:transparent;border:1px dashed #333;border-radius:3px;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:.65rem;letter-spacing:.12em;padding:10px;cursor:pointer;transition:all .2s;margin-bottom:14px}
+.btn-add-clip:hover{border-color:var(--green);color:var(--green)}
+.btn-remove{background:transparent;border:none;color:#333;font-size:.8rem;cursor:pointer;padding:2px 6px;transition:color .2s}
+.btn-remove:hover{color:var(--red)}
+
+/* PRODUCE BUTTON */
+.btn-produce{width:100%;background:var(--green);color:#08080c;border:none;border-radius:4px;font-family:'Bebas Neue',sans-serif;font-size:1.2rem;letter-spacing:.15em;padding:14px;cursor:pointer;transition:opacity .2s}
+.btn-produce:hover{opacity:.88}
+.btn-produce:disabled{opacity:.35;cursor:not-allowed}
+
+/* RIGHT — CONSOLE */
+.studio-right{padding:14px;overflow-y:auto;background:#09090e}
+.console-title{font-family:'Bebas Neue',sans-serif;font-size:.9rem;color:var(--green);letter-spacing:.15em;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.console-stats{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.stat-chip{font-family:'JetBrains Mono',monospace;font-size:.58rem;padding:3px 8px;border-radius:2px;border:1px solid;white-space:nowrap}
+.stat-running{border-color:#f59e0b44;color:var(--amber);background:#f59e0b11}
+.stat-done{border-color:#22c55e44;color:var(--green);background:#22c55e11}
+.stat-error{border-color:#ef444444;color:var(--red);background:#ef444411}
+
+/* CLIP CARDS CONSOLE */
+.clip-card{background:var(--surface);border:1px solid var(--border);border-radius:3px;padding:10px 12px;margin-bottom:6px;transition:border-color .3s}
+.clip-card.running{border-color:#f59e0b44}
+.clip-card.done{border-color:#22c55e44}
+.clip-card.error{border-color:#ef444444}
+.clip-card.queued{border-color:#3b82f644}
+.clip-card-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.clip-card-branch{font-family:'JetBrains Mono',monospace;font-size:.6rem;font-weight:700;padding:2px 7px;border-radius:2px}
+.branch-wan22{background:#d4a84322;color:var(--gold);border:1px solid #d4a84344}
+.branch-cogvideox{background:#00e5ff22;color:var(--cyan);border:1px solid #00e5ff44}
+.branch-ltx{background:#a855f722;color:var(--purple);border:1px solid #a855f744}
+.branch-pollinations-img,.branch-pollinations-vid{background:#22c55e22;color:var(--green);border:1px solid #22c55e44}
+.clip-card-elapsed{font-family:'JetBrains Mono',monospace;font-size:.58rem;color:var(--muted);margin-left:auto}
+.clip-card-prompt{font-size:.72rem;color:#aaa;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.progress-bar{height:4px;background:#1e1e2e;border-radius:2px;overflow:hidden;margin-bottom:4px}
+.progress-fill{height:100%;border-radius:2px;transition:width .5s ease,background .3s}
+.fill-running{background:linear-gradient(90deg,var(--amber),var(--gold))}
+.fill-done{background:var(--green)}
+.fill-error{background:var(--red)}
+.fill-queued{background:var(--blue)}
+.clip-step{font-family:'JetBrains Mono',monospace;font-size:.58rem;color:var(--muted)}
+.clip-result-thumb{width:100%;border-radius:3px;margin-top:6px;border:1px solid var(--green);max-height:120px;object-fit:cover;cursor:pointer}
+.clip-result-video{width:100%;border-radius:3px;margin-top:6px;border:1px solid var(--green);max-height:120px}
+
+/* ── VUE GALERIE ── */
+.gallery{padding:20px;display:flex;flex-direction:column}
+.gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.gallery-item{background:var(--surface);border:1px solid var(--border);border-radius:4px;overflow:hidden;cursor:pointer;transition:border-color .2s}
+.gallery-item:hover{border-color:var(--green)}
+.gallery-item img,.gallery-item video{width:100%;height:160px;object-fit:cover;display:block}
+.gallery-item-meta{padding:8px 10px}
+.gallery-item-branch{font-family:'JetBrains Mono',monospace;font-size:.58rem;color:var(--muted)}
+.gallery-item-prompt{font-size:.72rem;color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* LIGHTBOX */
+.lightbox{display:none;position:fixed;inset:0;background:#000c;z-index:100;align-items:center;justify-content:center;flex-direction:column;gap:12px}
+.lightbox.open{display:flex}
+.lightbox video,.lightbox img{max-width:90vw;max-height:80vh;border-radius:4px}
+.lightbox-close{color:#fff;font-size:2rem;cursor:pointer;position:absolute;top:20px;right:24px}
+
+/* SCROLLBAR */
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-thumb{background:#22c55e33;border-radius:2px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.pulsing{animation:pulse 1.5s infinite}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <div>
+    <div class="logo-sup">ETHERAVOLT · LMDB17</div>
+    <div class="logo-main">⚡ TESLA GO V8</div>
+    <div class="logo-sub">Console de Production Parallèle · 100% Gratuit · Data Center HF</div>
+  </div>
+  <div id="status-dot" class="dot" title="Proxy"></div>
+  <span class="sig">TIK TIK TIK ⚡</span>
+</header>
+
+<!-- TABS -->
+<div class="tabs">
+  <div class="tab active" onclick="showView('studio',this)">STUDIO</div>
+  <div class="tab" onclick="showView('gallery',this)">GALERIE</div>
+</div>
+
+<!-- VUE STUDIO -->
+<main>
+<div id="view-studio" class="view active">
+  <div class="studio">
+
+    <!-- LEFT : clip builders -->
+    <div class="studio-left">
+      <div class="section-label" style="margin-bottom:12px">
+        Clips à générer — <span id="clip-count">1</span> / 9 max
+      </div>
+
+      <div id="clips-container">
+        <!-- injecté dynamiquement -->
+      </div>
+
+      <button class="btn-add-clip" onclick="addClip()" id="btn-add">
+        + AJOUTER UN CLIP
+      </button>
+
+      <button class="btn-produce" id="btn-produce" onclick="produce()">
+        ⚡ LANCER LA PRODUCTION PARALLÈLE
+      </button>
+    </div>
+
+    <!-- RIGHT : console temps réel -->
+    <div class="studio-right">
+      <div class="console-title">
+        <span class="pulsing" id="console-pulse" style="display:none">●</span>
+        CONSOLE DE PRODUCTION
+      </div>
+      <div class="console-stats" id="console-stats">
+        <span class="stat-chip stat-running">0 en cours</span>
+        <span class="stat-chip stat-done">0 terminés</span>
+      </div>
+      <div id="console-clips">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:.62rem;color:var(--muted);">
+          Lance une production pour voir les workers ici.
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- VUE GALERIE -->
+<div id="view-gallery" class="view">
+  <div class="gallery">
+    <div class="section-label" style="margin-bottom:14px">RÉSULTATS GÉNÉRÉS</div>
+    <div class="gallery-grid" id="gallery-grid">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--muted);">
+        Aucun résultat pour l'instant — lance une production !
+      </div>
+    </div>
+  </div>
+</div>
+</main>
+
+<!-- LIGHTBOX -->
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <span class="lightbox-close">✕</span>
+  <div id="lightbox-content"></div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+const PROXY   = 'http://127.0.0.1:8369';
+const GALLERY = [];   // {result, branch, prompt}
+let   clipCount = 0;
+let   consoleInterval = null;
+let   activeSession = null;
+
+const BRANCHES = [
+  {v:'auto',       l:'🤖 Auto (recommandé)'},
+  {v:'wan22',      l:'🌊 Wan2.2 — T2V/I2V 720P'},
+  {v:'cogvideox',  l:'🧠 CogVideoX — Cinématique'},
+  {v:'ltx',        l:'⚡ LTX-Video — 30fps HD'},
+  {v:'pollinations-img', l:'🖼  Pollinations — Image'},
+  {v:'pollinations-vid', l:'🎬 Pollinations — Vidéo'},
+];
+const INTENTS = [
+  {v:'t2v',       l:'Text → Vidéo'},
+  {v:'i2v',       l:'Image → Vidéo'},
+  {v:'image',     l:'Text → Image'},
+  {v:'cinematic', l:'Cinématique'},
+  {v:'hd30fps',   l:'HD 30fps'},
+  {v:'mix',       l:'Mix auto (distribué)'},
+];
+
+const BRANCH_CLASS = {
+  'wan22':'branch-wan22','cogvideox':'branch-cogvideox',
+  'ltx':'branch-ltx','pollinations-img':'branch-pollinations-img',
+  'pollinations-vid':'branch-pollinations-vid','auto':'branch-wan22',
+};
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.onload = () => {
+  addClip();
+  checkHealth();
+  setInterval(checkHealth, 15000);
+};
+
+function showView(id, tab) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('view-'+id).classList.add('active');
+  tab.classList.add('active');
+}
+
+// ── Clips UI ──────────────────────────────────────────────────────────────────
+function addClip() {
+  if (clipCount >= 9) return;
+  clipCount++;
+  document.getElementById('clip-count').textContent = clipCount;
+  const c  = document.createElement('div');
+  c.className = 'clip-builder';
+  c.id = 'clip-'+clipCount;
+
+  const bOpts = BRANCHES.map(b =>
+    `<option value="${b.v}">${b.l}</option>`).join('');
+  const iOpts = INTENTS.map(i =>
+    `<option value="${i.v}">${i.l}</option>`).join('');
+
+  c.innerHTML = `
+    <div class="clip-header">
+      <span class="clip-num">CLIP ${String(clipCount).padStart(2,'0')}</span>
+      <button class="btn-remove" onclick="removeClip(${clipCount})">✕</button>
+    </div>
+    <textarea class="clip-prompt" id="prompt-${clipCount}"
+      placeholder="Décris ce clip… ex: Tesla coil discharging 432Hz energy, dark lab, cinematic"
+      oninput="onPromptInput(${clipCount})"></textarea>
+    <div class="clip-controls">
+      <div>
+        <div class="section-label" style="margin-bottom:3px">Branche</div>
+        <select class="clip-sel" id="branch-${clipCount}">${bOpts}</select>
+      </div>
+      <div>
+        <div class="section-label" style="margin-bottom:3px">Intent</div>
+        <select class="clip-sel" id="intent-${clipCount}">${iOpts}</select>
+      </div>
+    </div>`;
+  document.getElementById('clips-container').appendChild(c);
+  if (clipCount >= 9) document.getElementById('btn-add').disabled = true;
+}
+
+function removeClip(n) {
+  const el = document.getElementById('clip-'+n);
+  if (el) el.remove();
+  if (clipCount >= 9) document.getElementById('btn-add').disabled = false;
+}
+
+function onPromptInput(n) {
+  const el = document.getElementById('clip-'+n);
+  const has = document.getElementById('prompt-'+n)?.value.trim();
+  if (el) el.classList.toggle('active', !!has);
+}
+
+// ── Health ────────────────────────────────────────────────────────────────────
+async function checkHealth() {
+  const dot = document.getElementById('status-dot');
+  try {
+    const r = await fetch(PROXY+'/health');
+    dot.className = r.ok ? 'dot ok' : 'dot err';
+  } catch { dot.className = 'dot err'; }
+}
+
+// ── PRODUCE ───────────────────────────────────────────────────────────────────
+async function produce() {
+  // Collecter tous les clips remplis
+  const clips = [];
+  for (let i = 1; i <= clipCount; i++) {
+    const prompt = document.getElementById('prompt-'+i)?.value.trim();
+    if (!prompt) continue;
+    clips.push({
+      prompt,
+      branch: document.getElementById('branch-'+i)?.value || 'auto',
+      intent: document.getElementById('intent-'+i)?.value || 't2v',
+    });
+  }
+  if (!clips.length) { alert('Écris au moins un prompt !'); return; }
+
+  const btn = document.getElementById('btn-produce');
+  btn.disabled = true;
+  btn.textContent = '⏳ PRODUCTION EN COURS…';
+
+  try {
+    const res = await fetch(PROXY+'/api/produce', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({clips})
+    });
+    const data = await res.json();
+    activeSession = data.session_id;
+    startConsole(data.session_id, data.clip_ids);
+  } catch(e) {
+    alert('Proxy non joignable — lance start.bat\n'+e.message);
+    btn.disabled = false;
+    btn.textContent = '⚡ LANCER LA PRODUCTION PARALLÈLE';
+  }
+}
+
+// ── Console SSE ───────────────────────────────────────────────────────────────
+// CORRECTION [3] : reconnexion SSE automatique
+function startConsole(sessionId, clipIds) {
+  document.getElementById('console-pulse').style.display = 'inline';
+  let retries = 0;
+  let es = null;
+  let done = false;
+
+  function connect() {
+    if (done) return;
+    es = new EventSource(`${PROXY}/stream/session/${sessionId}`);
+
+    es.onmessage = (e) => {
+      // Ignorer les pings keep-alive (lignes vides)
+      if (!e.data || e.data.trim() === '') return;
+      let data;
+      try { data = JSON.parse(e.data); } catch { return; }
+
+      retries = 0;   // reset retry count si on reçoit des données
+      renderConsole(data.clips);
+
+      if (data.all_done) {
+        done = true;
+        es.close();
+        document.getElementById('console-pulse').style.display = 'none';
+        document.getElementById('btn-produce').disabled = false;
+        document.getElementById('btn-produce').textContent = '⚡ LANCER LA PRODUCTION PARALLÈLE';
+        data.clips.forEach(c => {
+          if (c.result) GALLERY.push({result:c.result,branch:c.branch,prompt:c.prompt});
+        });
+        renderGallery();
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      if (done) return;
+      retries++;
+      if (retries <= 10) {
+        const delay = Math.min(2000 * retries, 15000);
+        console.log(`SSE déconnecté — reconnexion dans ${delay}ms (tentative ${retries})`);
+        setTimeout(connect, delay);
+      } else {
+        // Trop de tentatives : polling de secours
+        console.log('SSE abandon — polling de secours');
+        pollFallback(sessionId);
+      }
+    };
+  }
+
+  // Polling de secours si SSE complètement mort
+  async function pollFallback(sid) {
+    for (let i = 0; i < 120; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+      try {
+        const r = await fetch(`${PROXY}/console`);
+        const data = await r.json();
+        renderConsole(data.clips);
+        if (data.active === 0) break;
+      } catch {}
+    }
+    document.getElementById('console-pulse').style.display = 'none';
+    document.getElementById('btn-produce').disabled = false;
+    document.getElementById('btn-produce').textContent = '⚡ LANCER LA PRODUCTION PARALLÈLE';
+  }
+
+  connect();
+}
+
+function renderConsole(clips) {
+  const running = clips.filter(c => c.status === 'running').length;
+  const done    = clips.filter(c => c.status === 'done').length;
+  const errors  = clips.filter(c => c.status === 'error').length;
+
+  document.getElementById('console-stats').innerHTML = `
+    <span class="stat-chip stat-running">${running} en cours</span>
+    <span class="stat-chip stat-done">${done} terminés</span>
+    ${errors ? `<span class="stat-chip stat-error">${errors} erreurs</span>` : ''}
+    <span class="stat-chip" style="border-color:#3b82f644;color:#3b82f6;background:#3b82f611">
+      ${clips.length} total
+    </span>`;
+
+  const container = document.getElementById('console-clips');
+  clips.forEach(c => {
+    let card = document.getElementById('cc-'+c.id);
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'clip-card';
+      card.id = 'cc-'+c.id;
+      container.appendChild(card);
+    }
+    card.className = 'clip-card '+c.status;
+    const brClass = BRANCH_CLASS[c.branch] || 'branch-wan22';
+    const fillClass = {running:'fill-running',done:'fill-done',
+                       error:'fill-error',queued:'fill-queued'}[c.status]||'fill-queued';
+    const isVideo = c.result && (c.result.endsWith('.mp4')||c.result.includes('/video'));
+    const isImg   = c.result && !isVideo;
+
+    card.innerHTML = `
+      <div class="clip-card-head">
+        <span class="clip-card-branch ${brClass}">${c.branch}</span>
+        <span style="font-size:.6rem;color:#888;font-family:'JetBrains Mono',monospace">
+          ${statusIcon(c.status)} ${c.status.toUpperCase()}
+        </span>
+        <span class="clip-card-elapsed">${c.elapsed}s</span>
+      </div>
+      <div class="clip-card-prompt">${c.prompt}</div>
+      <div class="progress-bar">
+        <div class="progress-fill ${fillClass}" style="width:${c.progress}%"></div>
+      </div>
+      <div class="clip-step">${c.step || statusLabel(c.status)}</div>
+      ${isVideo ? `<video class="clip-result-video" src="${c.result}" autoplay muted loop playsinline></video>` : ''}
+      ${isImg ? `<img class="clip-result-thumb" src="${c.result}" onclick="openLightbox('${c.result}','img')" alt=""/>` : ''}
+      ${c.error ? `<div style="font-size:.6rem;color:var(--red);margin-top:4px">❌ ${c.error}</div>` : ''}`;
+  });
+}
+
+function statusIcon(s) {
+  return {running:'⏳',done:'✅',error:'❌',queued:'🔵'}[s]||'•';
+}
+function statusLabel(s) {
+  return {running:'En génération…',done:'Terminé',error:'Erreur',queued:'En file…'}[s]||s;
+}
+
+// ── Galerie ───────────────────────────────────────────────────────────────────
+function renderGallery() {
+  const g = document.getElementById('gallery-grid');
+  if (!GALLERY.length) return;
+  g.innerHTML = '';
+  [...GALLERY].reverse().forEach(item => {
+    const el   = document.createElement('div');
+    el.className = 'gallery-item';
+    const isVid = item.result.endsWith('.mp4')||item.result.includes('/video');
+    el.innerHTML = `
+      ${isVid
+        ? `<video src="${item.result}" muted loop playsinline></video>`
+        : `<img src="${item.result}" alt=""/>`}
+      <div class="gallery-item-meta">
+        <div class="gallery-item-branch">${item.branch}</div>
+        <div class="gallery-item-prompt">${item.prompt}</div>
+      </div>`;
+    el.onclick = () => openLightbox(item.result, isVid ? 'video' : 'img');
+    el.onmouseenter = () => el.querySelector('video')?.play();
+    el.onmouseleave = () => el.querySelector('video')?.pause();
+    g.appendChild(el);
+  });
+}
+
+function openLightbox(src, type) {
+  document.getElementById('lightbox-content').innerHTML =
+    type === 'video'
+      ? `<video src="${src}" controls autoplay style="max-width:90vw;max-height:80vh;border-radius:4px"></video>`
+      : `<img src="${src}" style="max-width:90vw;max-height:80vh;border-radius:4px"/>`;
+  document.getElementById('lightbox').classList.add('open');
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('open');
+  document.getElementById('lightbox-content').innerHTML = '';
+}
+</script>
+</body>
+</html>

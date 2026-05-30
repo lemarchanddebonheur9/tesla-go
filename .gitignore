@@ -1,0 +1,25 @@
+# Secrets
+.env
+*.key
+
+# Outputs vidéo générés
+outputs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Modèles locaux (lourds)
+Wan2.2-TI2V-5B/
+Wan2.2/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.zip
