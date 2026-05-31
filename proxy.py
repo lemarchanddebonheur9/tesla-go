@@ -585,9 +585,21 @@ async def handle_options(request):
     return web.Response(headers=CORS, status=204)
 
 async def handle_index(request):
-    p = Path(__file__).parent / "tesla-go-v8.html"
-    return web.FileResponse(p) if p.exists() else web.Response(
-        text="tesla-go-v8.html introuvable", status=404)
+    # Cherche le HTML dans plusieurs emplacements possibles
+    candidates = [
+        Path(__file__).parent / "tesla-go-v8.html",   # même dossier que proxy.py
+        Path.cwd() / "tesla-go-v8.html",               # répertoire courant
+        Path(__file__).parent.parent / "tesla-go-v8.html",  # dossier parent
+    ]
+    for p in candidates:
+        if p.exists():
+            return web.FileResponse(p)
+    # Introuvable : message d'aide clair
+    searched = "\n".join(str(c) for c in candidates)
+    return web.Response(
+        text=f"tesla-go-v8.html introuvable.\n\nEmplacements cherchés :\n{searched}\n\nPlace tesla-go-v8.html dans le même dossier que proxy.py.",
+        status=404
+    )
 
 async def handle_health(request):
     return web.json_response({
