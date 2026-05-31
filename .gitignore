@@ -18,6 +18,9 @@ env/
 Wan2.2-TI2V-5B/
 Wan2.2/
 
+# Claude Code internal
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
