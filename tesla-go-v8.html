@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>⚡ TESLA GO V8 — Console de Production</title>
+<title>⚡ TESLA GO V9 — Console de Production</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@300;400;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet"/>
 <style>
 :root {
@@ -125,8 +125,8 @@ select.clip-sel:focus{border-color:var(--green)}
 <header>
   <div>
     <div class="logo-sup">ETHERAVOLT · LMDB17</div>
-    <div class="logo-main">⚡ TESLA GO V8</div>
-    <div class="logo-sub">Console de Production Parallèle · 100% Gratuit · Data Center HF</div>
+    <div class="logo-main">⚡ TESLA GO V9</div>
+    <div class="logo-sub">Console de Production V9 — 6 Branches · 100% Gratuit · Data Center HF</div>
   </div>
   <div id="status-dot" class="dot" title="Proxy"></div>
   <span class="sig">TIK TIK TIK ⚡</span>
@@ -216,6 +216,7 @@ const BRANCHES = [
   {v:'ltx',        l:'⚡ LTX-Video — 30fps HD'},
   {v:'pollinations-img', l:'🖼  Pollinations — Image'},
   {v:'pollinations-vid', l:'🎬 Pollinations — Vidéo'},
+  {v:'svd', l:'🎞  SVD — Image→Vidéo 4s'},
 ];
 const INTENTS = [
   {v:'t2v',       l:'Text → Vidéo'},
@@ -230,6 +231,7 @@ const BRANCH_CLASS = {
   'wan22':'branch-wan22','cogvideox':'branch-cogvideox',
   'ltx':'branch-ltx','pollinations-img':'branch-pollinations-img',
   'pollinations-vid':'branch-pollinations-vid','auto':'branch-wan22',
+  'svd':'branch-pollinations-img',
 };
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -284,8 +286,8 @@ function addClip() {
 
 function removeClip(n) {
   const el = document.getElementById('clip-'+n);
-  if (el) el.remove();
-  if (clipCount >= 9) document.getElementById('btn-add').disabled = false;
+  if (el) { el.remove(); clipCount--; document.getElementById('clip-count').textContent = clipCount; }
+  document.getElementById('btn-add').disabled = clipCount >= 9;
 }
 
 function onPromptInput(n) {

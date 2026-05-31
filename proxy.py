@@ -71,6 +71,7 @@ SEMS = {
     "animatediff":      asyncio.Semaphore(3),
     "wan22":            asyncio.Semaphore(2),
     "ltx":              asyncio.Semaphore(2),
+    "svd":              asyncio.Semaphore(2),
     "local":            asyncio.Semaphore(1),
 }
 
@@ -80,6 +81,7 @@ FALLBACK = {
     "ltx":        "cogvideox",
     "cogvideox":  "animatediff",
     "animatediff":"pollinations-vid",
+    "svd":        "pollinations-vid",
 }
 
 
@@ -105,6 +107,17 @@ def upd(cid, **kw):
         CLIPS[cid].update(kw)
         if CLIPS[cid].get("started_at"):
             CLIPS[cid]["elapsed"] = round(time.time() - CLIPS[cid]["started_at"], 1)
+
+
+def cleanup_old_clips(max_sessions=50):
+    """Purge sessions/clips les plus anciens au-delà de max_sessions."""
+    if len(SESSIONS) <= max_sessions:
+        return
+    sorted_sessions = sorted(SESSIONS.values(), key=lambda s: s["created"])
+    for s in sorted_sessions[:len(SESSIONS) - max_sessions]:
+        for cid in s.get("clip_ids", []):
+            CLIPS.pop(cid, None)
+        SESSIONS.pop(s["id"], None)
 
 
 async def tick_loop(cid, start):
@@ -201,8 +214,22 @@ async def gen_pollinations_video(cid, prompt):
                 upd(cid, progress=80, step="Finalisation vidéo…")
                 if r.status == 200:
                     data = await r.json()
-                    upd(cid, progress=100, step="Vidéo prête ✓",
-                        status="done", result=data.get("url"))
+                    video_url = data.get("url")
+                    if video_url:
+                        # Download and save locally
+                        async with s.get(video_url, timeout=aiohttp.ClientTimeout(total=120)) as vr:
+                            if vr.status == 200:
+                                fname = f"{uuid.uuid4().hex[:12]}.mp4"
+                                dest = OUTPUTS / fname
+                                dest.write_bytes(await vr.read())
+                                local_url = f"http://127.0.0.1:{PORT}/outputs/{fname}"
+                                upd(cid, progress=100, step="Vidéo prête ✓",
+                                    status="done", result=local_url)
+                            else:
+                                upd(cid, progress=100, step="Vidéo prête ✓",
+                                    status="done", result=video_url)  # fallback: external URL
+                    else:
+                        raise RuntimeError("Pollinations vidéo: URL manquante dans la réponse")
                 else:
                     raise RuntimeError(f"Pollinations vidéo HTTP {r.status}")
     except Exception as e:
@@ -322,6 +349,51 @@ async def gen_animatediff(cid, prompt, base="epiCRealism"):
         tick.cancel()
 
 
+async def gen_svd(cid, prompt, image_url=None):
+    """✅ SVD — Stable Video Diffusion I2V via Pollinations image + SVD Space."""
+    t = time.time()
+    upd(cid, status="running", started_at=t,
+        step="Génération image source Pollinations…", progress=10)
+    tick = asyncio.create_task(tick_loop(cid, t))
+    try:
+        import urllib.parse
+        # Step 1: generate source image via Pollinations if no image provided
+        if not image_url:
+            img_url = (f"https://image.pollinations.ai/prompt/"
+                       f"{urllib.parse.quote(prompt)}?model=flux&width=1024&height=576&seed=369&nologo=true")
+            async with aiohttp.ClientSession() as s:
+                async with s.get(img_url, timeout=aiohttp.ClientTimeout(total=45)) as r:
+                    if r.status != 200:
+                        raise RuntimeError(f"Pollinations image HTTP {r.status}")
+                    fname = f"{uuid.uuid4().hex[:12]}.jpg"
+                    dest = OUTPUTS / fname
+                    dest.write_bytes(await r.read())
+                    src_img = str(dest)
+        else:
+            src_img = image_url
+        upd(cid, progress=35, step="Connexion SVD Space…")
+        loop = asyncio.get_event_loop()
+        def _call_svd():
+            c = Client("multimodalart/stable-video-diffusion", verbose=False)
+            result = c.predict(
+                image=handle_file(src_img),
+                seed=369, randomize_seed=False,
+                motion_bucket_id=127, fps_id=6,
+                api_name="/video"
+            )
+            path = result[0] if isinstance(result, (list, tuple)) else result
+            if path and Path(str(path)).exists():
+                return save_to_outputs(str(path), ".mp4")
+            raise RuntimeError("SVD: aucun fichier vidéo")
+        upd(cid, progress=60, step="Génération SVD (image→vidéo)…")
+        url = await loop.run_in_executor(None, _call_svd)
+        upd(cid, progress=100, step="Vidéo SVD prête ✓", status="done", result=url)
+    except Exception as e:
+        upd(cid, status="error", error=f"SVD: {e}")
+    finally:
+        tick.cancel()
+
+
 def _call_hf_space_generic(space_id, api_name, **kwargs):
     """Appel générique pour les Spaces qui nécessitent HF_TOKEN (Wan2.2, LTX)."""
     if not HF_TOKEN:
@@ -334,8 +406,63 @@ def _call_hf_space_generic(space_id, api_name, **kwargs):
     raise RuntimeError(f"{space_id} : aucun fichier récupéré")
 
 
+def _call_wan22(prompt, image_url=None):
+    spaces = ["Wan-AI/Wan-2.2-5B", "fffiloni/Wan2.1"]
+    for space_id in spaces:
+        try:
+            kw = {}
+            if HF_TOKEN:
+                kw["hf_token"] = HF_TOKEN
+            c = Client(space_id, verbose=False, **kw)
+            if image_url:
+                result = c.predict(image=handle_file(image_url), prompt=prompt,
+                                   num_frames=81, api_name="/generate_i2v")
+            else:
+                if space_id == "fffiloni/Wan2.1":
+                    result = c.predict(txt2vid_prompt=prompt, resolution="720*1280",
+                                       sd_steps=50, guide_scale=5.0, shift_scale=5.0,
+                                       seed=-1, n_prompt="", api_name="/t2v_generation")
+                else:
+                    result = c.predict(prompt=prompt, num_frames=81, api_name="/generate_t2v")
+            path = extract_video_path(result)
+            if path and Path(str(path)).exists():
+                return save_to_outputs(str(path), ".mp4")
+        except Exception as e:
+            log.warning(f"Wan22 {space_id} échoué: {e}, essai suivant…")
+    raise RuntimeError("Wan2.2/Wan2.1: tous les Spaces ont échoué")
+
+
+def _call_ltx(prompt, image_url=None):
+    kw = {}
+    if HF_TOKEN:
+        kw["hf_token"] = HF_TOKEN
+    c = Client("Lightricks/ltx-video-distilled", verbose=False, **kw)
+    if image_url:
+        result = c.predict(
+            prompt=prompt, negative_prompt="worst quality, inconsistent motion",
+            image_filepath=handle_file(image_url), video_filepath=None,
+            mode="image-to-video", height_ui=512, width_ui=704, duration_ui=3.0,
+            ui_frames_to_use=9, seed_ui=369, randomize_seed=False,
+            ui_guidance_scale=3.0, improve_texture_flag=True,
+            api_name="/image_to_video"
+        )
+    else:
+        result = c.predict(
+            prompt=prompt, negative_prompt="worst quality, inconsistent motion",
+            image_filepath=None, video_filepath=None,
+            mode="text-to-video", height_ui=512, width_ui=704, duration_ui=3.0,
+            ui_frames_to_use=9, seed_ui=369, randomize_seed=False,
+            ui_guidance_scale=3.0, improve_texture_flag=True,
+            api_name="/text_to_video"
+        )
+    path = extract_video_path(result)
+    if path and Path(str(path)).exists():
+        return save_to_outputs(str(path), ".mp4")
+    raise RuntimeError("LTX: aucun fichier vidéo récupéré")
+
+
 async def gen_wan22(cid, prompt, image_url=None):
-    """⚠  Wan2.2 — nécessite HF_TOKEN valide et Space actif."""
+    """⚠  Wan2.2 — fallback vers fffiloni/Wan2.1 si Space principal KO."""
     t = time.time()
     upd(cid, status="running", started_at=t,
         step="Connexion Wan2.2 Space…", progress=5)
@@ -350,14 +477,7 @@ async def gen_wan22(cid, prompt, image_url=None):
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
     try:
-        kw = {"prompt": prompt, "num_frames": 81}
-        api = "/generate_t2v"
-        if image_url:
-            kw["image"] = handle_file(image_url)
-            api = "/generate_i2v"
-        url = await loop.run_in_executor(
-            None, lambda: _call_hf_space_generic("Wan-AI/Wan-2.2-5B", api, **kw)
-        )
+        url = await loop.run_in_executor(None, lambda: _call_wan22(prompt, image_url))
         prog_task.cancel()
         upd(cid, progress=100, step="Vidéo Wan2.2 prête ✓", status="done", result=url)
     except Exception as e:
@@ -368,7 +488,7 @@ async def gen_wan22(cid, prompt, image_url=None):
 
 
 async def gen_ltx(cid, prompt, image_url=None):
-    """⚠  LTX-Video — nécessite HF_TOKEN valide et Space actif."""
+    """⚠  LTX-Video — Space distilled (correct Space ID)."""
     t = time.time()
     upd(cid, status="running", started_at=t,
         step="Connexion LTX-Video Space…", progress=5)
@@ -383,16 +503,7 @@ async def gen_ltx(cid, prompt, image_url=None):
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
     try:
-        kw = {"prompt": prompt, "seed": 369, "guidance_scale": 3.0,
-              "height": 704, "width": 1216, "num_frames": 121}
-        api = "/text_to_video"
-        if image_url:
-            kw = {"prompt": prompt, "image": handle_file(image_url),
-                  "seed": 369, "guidance_scale": 3.0}
-            api = "/image_to_video"
-        url = await loop.run_in_executor(
-            None, lambda: _call_hf_space_generic("Lightricks/LTX-Video", api, **kw)
-        )
+        url = await loop.run_in_executor(None, lambda: _call_ltx(prompt, image_url))
         prog_task.cancel()
         upd(cid, progress=100, step="Vidéo LTX prête ✓", status="done", result=url)
     except Exception as e:
@@ -441,6 +552,8 @@ async def _execute_branch(cid, branch, prompt, image):
         await gen_wan22(cid, prompt, image)
     elif branch == "ltx":
         await gen_ltx(cid, prompt, image)
+    elif branch == "svd":
+        await gen_svd(cid, prompt, image)
     else:
         await gen_cogvideox(cid, prompt)   # défaut sûr
 
@@ -452,6 +565,9 @@ def auto_branch(intent, index, total):
     if intent == "cinematic": return "cogvideox"
     if intent == "wan":       return "wan22"
     if intent == "hd30fps":   return "ltx"
+    if intent == "t2v":       return "cogvideox"
+    if intent == "i2v":       return "wan22"
+    if intent == "svd":       return "svd"
     if intent == "mix":
         return ["cogvideox", "animatediff", "pollinations-vid"][index % 3]
     return "cogvideox"   # défaut le plus fiable confirmé
@@ -471,7 +587,7 @@ async def handle_index(request):
 
 async def handle_health(request):
     return web.json_response({
-        "status": "ok", "version": "V8.1-PARALLEL",
+        "status": "ok", "version": "V9-OPTIMIZED",
         "port": PORT, "gradio": HAS_GRADIO, "hf_token": bool(HF_TOKEN),
         "workers_active": sum(1 for c in CLIPS.values() if c["status"]=="running"),
         "clips_done": sum(1 for c in CLIPS.values() if c["status"]=="done"),
@@ -490,12 +606,14 @@ async def handle_capabilities(request):
             {"id":"animatediff","name":"AnimateDiff-Lightning (HF Space)","ready":HAS_GRADIO,"token_required":False,"confirmed":True,"note":"rapide 4-step"},
             {"id":"wan22","name":"Wan2.2 TI2V-5B (HF Space)","ready":bool(HF_TOKEN),"token_required":True,"confirmed":False,"note":"Space parfois pausé"},
             {"id":"ltx","name":"LTX-Video 0.9.7 (HF Space)","ready":bool(HF_TOKEN),"token_required":True,"confirmed":False},
+            {"id":"svd","name":"Stable Video Diffusion (I2V)","ready":HAS_GRADIO,"token_required":False,"confirmed":True,"note":"image→vidéo 4s"},
         ],
         "fallback_chains": FALLBACK,
         "parallel_mode": True,
     }, headers=CORS)
 
 async def handle_produce(request):
+    cleanup_old_clips()
     data      = await request.json()
     clips_def = data.get("clips", [])
     if not clips_def:
@@ -672,7 +790,7 @@ def create_app():
 if __name__ == "__main__":
     print("""
 ╔═══════════════════════════════════════════════════╗
-║  ⚡ TESLA GO V8.1 — CONSOLE DE PRODUCTION         ║
+║  ⚡ TESLA GO V9 — CONSOLE DE PRODUCTION           ║
 ║  Endpoints vérifiés · Sauvegarde immédiate        ║
 ║  Fallback auto · SSE keep-alive                   ║
 ║  Port 8369 · LMDB17 / etheravolt.fr              ║
