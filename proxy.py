@@ -300,23 +300,27 @@ async def gen_cogvideox(cid, prompt, steps=50):
         tick.cancel()
 
 
-def _call_animatediff(prompt, base="epiCRealism", motion="", step="4"):
+def _call_animatediff(prompt, base="epiCRealism", motion="", step=4):
     """
-    ✅ ENDPOINT VÉRIFIÉ : ByteDance/AnimateDiff-Lightning
-    api_name="/generate_image"
-    Retourne Dict(video=filepath, subtitles=filepath|None)
+    ByteDance/AnimateDiff-Lightning — /generate_image
+    step doit être un int (pas une string).
     """
     kw = {}
     if HF_TOKEN:
         kw["hf_token"] = HF_TOKEN
     c = Client("ByteDance/AnimateDiff-Lightning", verbose=False, **kw)
-    result = c.predict(
-        prompt=prompt,
-        base=base,
-        motion=motion,
-        step=step,
-        api_name="/generate_image"
-    )
+    # Essai 1 : paramètres nommés
+    try:
+        result = c.predict(
+            prompt=prompt,
+            base=base,
+            motion=motion,
+            step=int(step),
+            api_name="/generate_image"
+        )
+    except TypeError:
+        # Essai 2 : positionnels (certaines versions du Space changent les noms)
+        result = c.predict(prompt, base, motion, int(step), api_name="/generate_image")
     path = extract_video_path(result)
     if path and Path(str(path)).exists():
         return save_to_outputs(str(path), ".mp4")
@@ -339,7 +343,7 @@ async def gen_animatediff(cid, prompt, base="epiCRealism"):
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
     try:
-        url = await loop.run_in_executor(None, _call_animatediff, prompt, base, "", "4")
+        url = await loop.run_in_executor(None, _call_animatediff, prompt, base, "", 4)
         prog_task.cancel()
         upd(cid, progress=100, step="Vidéo prête ✓", status="done", result=url)
     except Exception as e:
