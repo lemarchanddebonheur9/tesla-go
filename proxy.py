@@ -218,9 +218,9 @@ async def gen_pollinations_video(cid, prompt):
 
 def _call_cogvideox(prompt, steps=50, guidance=6.0):
     """
-    ★ V9 UPGRADE : THUDM/CogVideoX-5B-Space (5B au lieu de 2B)
-    api_name="/generate"
-    Retourne tuple (dict(video=filepath, subtitles=...), filepath_mp4, filepath_gif)
+    ★ V9 CORRIGÉ : THUDM/CogVideoX-5B-Space
+    api_name="/generate" — image_input/video_input passés à None pour T2V
+    Retourne tuple (dict(video=...), download_mp4, download_gif, seed)
     """
     kw = {}
     if HF_TOKEN:
@@ -228,13 +228,18 @@ def _call_cogvideox(prompt, steps=50, guidance=6.0):
     c = Client("THUDM/CogVideoX-5B-Space", verbose=False, **kw)
     result = c.predict(
         prompt=prompt,
-        num_inference_steps=float(steps),
-        guidance_scale=float(guidance),
+        image_input=None,
+        video_input=None,
+        video_strength=0.8,
+        seed_value=-1,
+        scale_status=False,
+        rife_status=False,
         api_name="/generate"
     )
+    # result[0] = dict(video=filepath), result[1] = download mp4
     path = extract_video_path(result)
-    if path and Path(path).exists():
-        return save_to_outputs(path, ".mp4")
+    if path and Path(str(path)).exists():
+        return save_to_outputs(str(path), ".mp4")
     if isinstance(result, (list, tuple)) and len(result) > 1:
         path2 = result[1]
         if path2 and Path(str(path2)).exists():
@@ -374,8 +379,50 @@ async def gen_wan22(cid, prompt, image_url=None):
         tick.cancel()
 
 
+def _call_ltx(prompt, image_url=None):
+    """
+    ★ V9 CORRIGÉ — LTX-Video-Distilled signature réelle vérifiée via view_api().
+    Params: prompt, negative_prompt, input_image_filepath, input_video_filepath,
+            height_ui, width_ui, mode, duration_ui, ui_frames_to_use,
+            seed_ui, randomize_seed, ui_guidance_scale, improve_texture_flag
+    Retourne: (dict(video=filepath, subtitles=...), seed)
+    """
+    kw = {}
+    if HF_TOKEN:
+        kw["hf_token"] = HF_TOKEN
+    c = Client("Lightricks/LTX-Video-Distilled", verbose=False, **kw)
+    api = "/text_to_video"
+    kwargs = dict(
+        prompt=prompt,
+        negative_prompt="worst quality, inconsistent motion, blurry, jittery, distorted",
+        input_image_filepath=None,
+        input_video_filepath=None,
+        height_ui=512,
+        width_ui=704,
+        mode="text-to-video",
+        duration_ui=2,
+        ui_frames_to_use=9,
+        seed_ui=369,
+        randomize_seed=False,
+        ui_guidance_scale=1.0,
+        improve_texture_flag=True,
+        api_name=api,
+    )
+    if image_url:
+        kwargs["input_image_filepath"] = image_url
+        kwargs["mode"] = "image-to-video"
+        kwargs["api_name"] = "/image_to_video"
+    result = c.predict(**kwargs)
+    # result = (dict(video=filepath, subtitles=...), seed_int)
+    video_dict = result[0] if isinstance(result, (list, tuple)) else result
+    path = extract_video_path(video_dict)
+    if path and Path(str(path)).exists():
+        return save_to_outputs(str(path), ".mp4")
+    raise RuntimeError("LTX-Distilled : aucun fichier vidéo récupéré")
+
+
 async def gen_ltx(cid, prompt, image_url=None):
-    """★ V9 PRIMAIRE — LTX-Video distilled ZeroGPU (Lightricks/LTX-Video-Distilled)."""
+    """★ V9 PRIMAIRE — LTX-Video Distilled ZeroGPU (signature corrigée)."""
     t = time.time()
     upd(cid, status="running", started_at=t,
         step="Connexion LTX-Video Distilled…", progress=5)
@@ -385,7 +432,7 @@ async def gen_ltx(cid, prompt, image_url=None):
         for prog, label in [
             (15, "Chargement LTX Distilled…"),
             (40, "DiT distilled — 8 steps 30fps…"),
-            (70, "Rendu 1216×704…"),
+            (70, "Rendu 704×512…"),
             (90, "Encodage MP4…"),
         ]:
             if CLIPS.get(cid, {}).get("status") != "running": break
@@ -395,16 +442,7 @@ async def gen_ltx(cid, prompt, image_url=None):
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
     try:
-        kw = {"prompt": prompt, "seed": 369, "guidance_scale": 1.0,
-              "height": 704, "width": 1216, "num_frames": 121}
-        api = "/text_to_video"
-        if image_url:
-            kw = {"prompt": prompt, "image": handle_file(image_url),
-                  "seed": 369, "guidance_scale": 1.0}
-            api = "/image_to_video"
-        url = await loop.run_in_executor(
-            None, lambda: _call_hf_space_generic("Lightricks/LTX-Video-Distilled", api, **kw)
-        )
+        url = await loop.run_in_executor(None, lambda: _call_ltx(prompt, image_url))
         prog_task.cancel()
         upd(cid, progress=100, step="Vidéo LTX Distilled prête ✓", status="done", result=url)
     except Exception as e:
@@ -541,22 +579,23 @@ async def handle_health(request):
         "clips_done": sum(1 for c in CLIPS.values() if c["status"]=="done"),
         "outputs_count": len(list(OUTPUTS.glob("*"))),
         "primary_branch": "ltx-distilled",
-        "cascade": ["ltx","wan22","cogvideox","animatediff","pollinations-vid"],
-        "branches_zerogpu": ["ltx","wan22","cogvideox","hunyuan"],
-        "branches_no_token": ["pollinations-img","pollinations-vid","animatediff","hunyuan"],
+        "cascade_no_token": ["ltx","cogvideox","animatediff","pollinations-vid"],
+        "cascade_with_token": ["ltx","wan22","cogvideox","animatediff","pollinations-vid"],
+        "branches_zerogpu_no_token": ["ltx","cogvideox"],
+        "branches_need_token": ["wan22","hunyuan"],
         "sig": "Tik Tik Tik — Le UN ⚡"
     }, headers=CORS)
 
 async def handle_capabilities(request):
     return web.json_response({
         "branches": [
-            {"id":"ltx","name":"LTX-Video Distilled ★ PRIMAIRE","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":1,"note":"8-step distilled 30fps"},
-            {"id":"wan22","name":"Wan2.2 T2V-14B FP8 AOTI","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":2,"note":"720P 14B optimisé"},
-            {"id":"cogvideox","name":"CogVideoX-5B (upgrade 2B→5B)","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":3},
-            {"id":"animatediff","name":"AnimateDiff-Lightning","ready":HAS_GRADIO,"token_required":False,"zerogpu":False,"rank":4,"note":"rapide 4-step"},
-            {"id":"hunyuan","name":"HunyuanVideo ZeroGPU","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":5},
-            {"id":"pollinations-vid","name":"Pollinations Vidéo","ready":True,"token_required":False,"zerogpu":False,"rank":6,"note":"sans clé"},
-            {"id":"pollinations-img","name":"Pollinations Images","ready":True,"token_required":False,"zerogpu":False,"rank":7},
+            {"id":"ltx","name":"LTX-Video Distilled ★ PRIMAIRE","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":1,"note":"2s 704×512 30fps · Space vérifié"},
+            {"id":"cogvideox","name":"CogVideoX-5B ZeroGPU","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":2,"note":"Space vérifié"},
+            {"id":"animatediff","name":"AnimateDiff-Lightning","ready":HAS_GRADIO,"token_required":False,"zerogpu":False,"rank":3,"note":"rapide 4-step · Space vérifié"},
+            {"id":"pollinations-vid","name":"Pollinations Vidéo","ready":True,"token_required":False,"zerogpu":False,"rank":4,"note":"sans clé"},
+            {"id":"pollinations-img","name":"Pollinations Images","ready":True,"token_required":False,"zerogpu":False,"rank":5},
+            {"id":"wan22","name":"Wan2.2 T2V-5B","ready":bool(HF_TOKEN),"token_required":True,"zerogpu":True,"rank":6,"note":"Space gated — HF_TOKEN requis"},
+            {"id":"hunyuan","name":"HunyuanVideo","ready":bool(HF_TOKEN),"token_required":True,"zerogpu":True,"rank":7,"note":"Space gated — HF_TOKEN requis"},
         ],
         "fallback_chains": FALLBACK,
         "parallel_mode": True,
