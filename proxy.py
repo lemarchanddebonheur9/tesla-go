@@ -23,16 +23,17 @@
 
   ÉVOLUTIONS V9
   ──────────────
-  [1] LTX-Video distilled = branche primaire (intent "studio" + défaut t2v)
-  [2] Wan2.2 T2V-14B FP8 AOTI — endpoint mis à jour
-  [3] CogVideoX-5B — upgrade depuis 2B
-  [4] HunyuanVideo — 7e branche ZeroGPU sans token
-  [5] Cascade 7 endpoints : ltx→wan22→cogvideox→animatediff→pollinations-vid
-  [6] Intent "studio" = LTX primaire automatique
+  [1] LTX-Video distilled = branche primaire (signature corrigée)
+  [2] CogVideoX-5B — upgrade depuis 2B (signature corrigée)
+  [3] Cascade vérifiée : ltx→cogvideox→animatediff→pollinations-vid
+  [4] wan22/hunyuan : token_required (Spaces gated)
+  [5] /api/compose — pipeline épisode complet :
+      script segments → TTS (Kokoro si HF_TOKEN, edge-tts sinon) → clips vidéo
+      → FFmpeg concat audio+vidéo → MP4 final publiable
 ================================================================================
 """
 
-import os, json, uuid, asyncio, logging, time, shutil
+import os, json, uuid, asyncio, logging, time, shutil, subprocess, tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -560,6 +561,217 @@ def auto_branch(intent, index, total):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  TTS — Kokoro (si HF_TOKEN) ou edge-tts (fallback gratuit)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+KOKORO_MODEL  = None   # chargé à la demande
+KOKORO_LOADED = False
+
+
+def _ensure_kokoro():
+    """Télécharge et charge Kokoro une seule fois (lazy init)."""
+    global KOKORO_MODEL, KOKORO_LOADED
+    if KOKORO_LOADED:
+        return KOKORO_MODEL
+    if not HF_TOKEN:
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        from kokoro_onnx import Kokoro
+        model_dir = Path(__file__).parent / ".kokoro"
+        model_dir.mkdir(exist_ok=True)
+        model_path  = hf_hub_download("hexgrad/Kokoro-82M-ONNX", "kokoro-v1_0.onnx",
+                                       token=HF_TOKEN, local_dir=str(model_dir))
+        voices_path = hf_hub_download("hexgrad/Kokoro-82M-ONNX", "voices.bin",
+                                       token=HF_TOKEN, local_dir=str(model_dir))
+        KOKORO_MODEL  = Kokoro(model_path, voices_path)
+        KOKORO_LOADED = True
+        log.info("Kokoro TTS chargé ✓")
+    except Exception as e:
+        log.warning(f"Kokoro non disponible ({e}) — edge-tts en fallback")
+        KOKORO_LOADED = True   # ne pas retenter
+    return KOKORO_MODEL
+
+
+def _tts_kokoro(text: str, out_path: str, voice: str = "af_heart",
+                speed: float = 1.0, lang: str = "fr-fr") -> bool:
+    """Génère l'audio via Kokoro ONNX. Retourne True si succès."""
+    import soundfile as sf
+    import numpy as np
+    kokoro = _ensure_kokoro()
+    if kokoro is None:
+        return False
+    try:
+        samples, sr = kokoro.create(text, voice=voice, speed=speed, lang=lang)
+        sf.write(out_path, samples, sr)
+        return True
+    except Exception as e:
+        log.warning(f"Kokoro TTS échoué : {e}")
+        return False
+
+
+async def _tts_edge(text: str, out_path: str,
+                    voice: str = "fr-FR-DeniseNeural") -> bool:
+    """Génère l'audio via edge-tts (Microsoft Edge, gratuit sans clé)."""
+    try:
+        import edge_tts
+        tts = edge_tts.Communicate(text, voice)
+        await tts.save(out_path)
+        return True
+    except Exception as e:
+        log.error(f"edge-tts échoué : {e}")
+        return False
+
+
+async def generate_tts(text: str, out_path: str,
+                       voice_kokoro: str = "af_heart",
+                       voice_edge: str = "fr-FR-DeniseNeural") -> bool:
+    """TTS avec Kokoro en primaire, edge-tts en fallback."""
+    loop = asyncio.get_event_loop()
+    ok = await loop.run_in_executor(None, _tts_kokoro, text, out_path, voice_kokoro, 1.0, "fr-fr")
+    if not ok:
+        ok = await _tts_edge(text, out_path, voice_edge)
+    return ok
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COMPOSE — pipeline épisode complet (TTS + clips + FFmpeg concat)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+COMPOSE_JOBS = {}
+
+
+async def run_compose(job_id: str, segments: list, voice_edge: str):
+    """
+    Pipeline complet :
+      1. Pour chaque segment : TTS → audio WAV/MP3
+      2. Optionnel : générer clip vidéo si prompt fourni
+      3. FFmpeg : assembler audio + clip → segment MP4
+      4. FFmpeg : concat tous les segments → épisode final MP4
+    """
+    job = COMPOSE_JOBS[job_id]
+
+    def upd_job(**kw):
+        COMPOSE_JOBS[job_id].update(kw)
+
+    upd_job(status="running", step="Démarrage pipeline…", progress=0)
+    tmpdir = Path(tempfile.mkdtemp(prefix="compose_"))
+    segment_files = []
+
+    try:
+        total = len(segments)
+        for i, seg in enumerate(segments):
+            text   = seg.get("text", "").strip()
+            prompt = seg.get("prompt", "").strip()
+            dur    = float(seg.get("duration", 5))
+            pct_base = int(i / total * 80)
+
+            upd_job(step=f"[{i+1}/{total}] TTS…", progress=pct_base)
+
+            # ── TTS ──────────────────────────────────────────────────────────
+            audio_path = str(tmpdir / f"seg{i:02d}_audio.mp3")
+            if text:
+                ok = await generate_tts(text, audio_path, voice_edge=voice_edge)
+                if not ok:
+                    audio_path = None
+            else:
+                audio_path = None
+
+            # ── Clip vidéo (optionnel) ────────────────────────────────────
+            clip_path = seg.get("clip_url")   # URL locale /outputs/xxx.mp4
+            if clip_path and clip_path.startswith("http://127.0.0.1"):
+                fname = clip_path.split("/outputs/")[-1]
+                local  = OUTPUTS / fname
+                clip_path = str(local) if local.exists() else None
+
+            # ── Durée audio réelle ─────────────────────────────────────────
+            real_dur = dur
+            if audio_path and Path(audio_path).exists():
+                r = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries",
+                     "format=duration", "-of", "default=nw=1:nk=1", audio_path],
+                    capture_output=True, text=True
+                )
+                try: real_dur = max(float(r.stdout.strip()), dur)
+                except: pass
+
+            # ── Assemblage segment ─────────────────────────────────────────
+            seg_out = str(tmpdir / f"seg{i:02d}.mp4")
+            upd_job(step=f"[{i+1}/{total}] FFmpeg assemble…", progress=pct_base + 5)
+
+            if clip_path and audio_path:
+                # vidéo + audio → looper la vidéo si audio plus long
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-stream_loop", "-1", "-i", clip_path,
+                    "-i", audio_path,
+                    "-shortest",
+                    "-c:v", "libx264", "-c:a", "aac",
+                    "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+                    seg_out
+                ]
+            elif audio_path:
+                # audio seul → fond noir + audio
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", f"color=c=black:s=1280x720:r=24:d={real_dur}",
+                    "-i", audio_path,
+                    "-shortest",
+                    "-c:v", "libx264", "-c:a", "aac",
+                    seg_out
+                ]
+            elif clip_path:
+                # vidéo seule → trim à dur
+                cmd = [
+                    "ffmpeg", "-y", "-i", clip_path,
+                    "-t", str(real_dur),
+                    "-c:v", "libx264", "-an",
+                    seg_out
+                ]
+            else:
+                continue
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                log.error(f"FFmpeg seg{i}: {result.stderr[-300:]}")
+                continue
+            segment_files.append(seg_out)
+
+        if not segment_files:
+            upd_job(status="error", error="Aucun segment produit")
+            return
+
+        # ── Concat final ──────────────────────────────────────────────────
+        upd_job(step="FFmpeg concat final…", progress=85)
+        concat_list = tmpdir / "concat.txt"
+        concat_list.write_text("\n".join(f"file '{f}'" for f in segment_files))
+
+        fname_out = f"episode_{uuid.uuid4().hex[:8]}.mp4"
+        out_mp4   = OUTPUTS / fname_out
+        cmd_concat = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
+            "-c:v", "libx264", "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(out_mp4)
+        ]
+        r2 = subprocess.run(cmd_concat, capture_output=True, text=True)
+        if r2.returncode != 0:
+            upd_job(status="error", error=f"Concat échoué : {r2.stderr[-300:]}")
+            return
+
+        result_url = f"http://127.0.0.1:{PORT}/outputs/{fname_out}"
+        upd_job(status="done", progress=100,
+                step="Épisode prêt ✓", result=result_url)
+        log.info(f"Compose {job_id} → {result_url}")
+
+    except Exception as e:
+        upd_job(status="error", error=str(e))
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  HANDLERS HTTP
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -747,6 +959,80 @@ async def handle_outputs(request):
     return web.FileResponse(p, headers=CORS) if p.exists() else web.Response(
         text="Fichier introuvable", status=404)
 
+async def handle_tts(request):
+    """POST /api/tts — génère un fichier audio et retourne son URL locale."""
+    data  = await request.json()
+    text  = data.get("text", "").strip()
+    voice = data.get("voice", "fr-FR-DeniseNeural")
+    if not text:
+        return web.json_response({"error": "text requis"}, status=400, headers=CORS)
+    fname = f"tts_{uuid.uuid4().hex[:10]}.mp3"
+    dest  = str(OUTPUTS / fname)
+    ok    = await generate_tts(text, dest, voice_edge=voice)
+    if not ok:
+        return web.json_response({"error": "TTS échoué"}, status=500, headers=CORS)
+    return web.json_response({
+        "url": f"http://127.0.0.1:{PORT}/outputs/{fname}",
+        "engine": "kokoro" if (KOKORO_MODEL is not None) else "edge-tts",
+        "voice": voice,
+    }, headers=CORS)
+
+
+async def handle_compose(request):
+    """
+    POST /api/compose — pipeline épisode complet.
+    Body JSON :
+    {
+      "segments": [
+        {"text": "Bienvenue dans Mercredis Tesla…", "prompt": "tesla car driving", "clip_url": "http://...", "duration": 8},
+        ...
+      ],
+      "voice": "fr-FR-DeniseNeural"   // optionnel
+    }
+    Retourne immédiatement {"job_id": "..."}, puis streamer /compose/{job_id}.
+    """
+    data     = await request.json()
+    segments = data.get("segments", [])
+    voice    = data.get("voice", "fr-FR-DeniseNeural")
+    if not segments:
+        return web.json_response({"error": "segments[] requis"}, status=400, headers=CORS)
+    if len(segments) > 20:
+        return web.json_response({"error": "max 20 segments"}, status=400, headers=CORS)
+    job_id = uuid.uuid4().hex[:8]
+    COMPOSE_JOBS[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0,
+        "step": "", "result": None, "error": None,
+        "created": datetime.now().isoformat(),
+    }
+    asyncio.create_task(run_compose(job_id, segments, voice))
+    return web.json_response({"job_id": job_id, "segments": len(segments)}, headers=CORS)
+
+
+async def handle_compose_stream(request):
+    """GET /compose/{job_id} — SSE suivi du job compose."""
+    job_id = request.match_info["job_id"]
+    if job_id not in COMPOSE_JOBS:
+        return web.Response(text="Job introuvable", status=404)
+    resp = web.StreamResponse(headers={
+        **CORS, "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+    })
+    await resp.prepare(request)
+    def sse(d): return f"data: {json.dumps(d, ensure_ascii=False)}\n\n".encode()
+    for _ in range(600):   # max 50 min
+        j = COMPOSE_JOBS.get(job_id, {})
+        try:
+            await resp.write(sse({
+                "id": j.get("id"), "status": j.get("status"),
+                "progress": j.get("progress", 0), "step": j.get("step", ""),
+                "result": j.get("result"), "error": j.get("error"),
+            }))
+        except: break
+        if j.get("status") in ("done", "error"): break
+        await asyncio.sleep(3)
+    return resp
+
+
 async def handle_history(request):
     recent = sorted(SESSIONS.values(), key=lambda s:s["created"], reverse=True)[:10]
     return web.json_response([{
@@ -774,14 +1060,17 @@ def create_app():
     app.router.add_get("/stream/{clip_id}",               handle_stream_clip)
     app.router.add_get("/outputs/{file}",                 handle_outputs)
     app.router.add_get("/history",                        handle_history)
+    app.router.add_post("/api/tts",                        handle_tts)
+    app.router.add_post("/api/compose",                    handle_compose)
+    app.router.add_get("/compose/{job_id}",               handle_compose_stream)
     return app
 
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════╗
 ║  ⚡ TESLA GO V9 — STUDIO QUANTIQUE                   ║
-║  LTX Distilled ★ · Wan2.2 14B · CogVideoX-5B        ║
-║  HunyuanVideo · 7 branches · Cascade ZeroGPU        ║
+║  LTX Distilled ★ · CogVideoX-5B · AnimateDiff       ║
+║  /api/compose · TTS Kokoro/edge-tts · FFmpeg         ║
 ║  Zéro coût absolu · Port 8369 · LMDB17              ║
 ║  Tik Tik Tik — Le UN ⚡                             ║
 ╚══════════════════════════════════════════════════════╝
