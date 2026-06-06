@@ -2,30 +2,33 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-  ETHV_APP_TESLAGO_PROXY_V8_PARALLEL_2026-05-30.py
+  ETHV_APP_TESLAGO_PROXY_V9_STUDIO_2026-06-06.py
 ================================================================================
-  ⚡ TESLA GO V8 — Console de Production Parallèle — 100% Gratuit
-  Endpoints HF Spaces VÉRIFIÉS · Téléchargement immédiat · SSE robuste
+  ⚡ TESLA GO V9 — Studio Quantique — 100% Gratuit · ZeroGPU
+  7 branches · LTX-Video distilled primaire · Cascade auto · SSE robuste
 
   Auteur    : Lolo (Laurent Becker) — LMDB17 / etheravolt.fr
   Port      : 8369 (constante TNT)
   Signature : Tik Tik Tik — Le UN ⚡
 
-  BRANCHES CONFIRMÉES (endpoints vérifiés en live)
+  BRANCHES V9 (cascade priorité décroissante)
   ─────────────────────────────────────────────────
-  pollinations-img  → image.pollinations.ai          ✅ sans clé
-  pollinations-vid  → gen.pollinations.ai/v1/video   ✅ alpha
-  cogvideox         → zai-org/CogVideoX-2B-Space     ✅ /generate
-  animatediff       → ByteDance/AnimateDiff-Lightning ✅ /generate_image
-  wan22             → Wan-AI/Wan-2.2-5B              ⚠  nécessite HF_TOKEN valide
-  ltx               → Lightricks/LTX-Video            ⚠  nécessite HF_TOKEN valide
+  ltx               → Lightricks/LTX-Video            ★ PRIMAIRE distilled ZeroGPU
+  wan22             → Wan-AI/Wan2.2-T2V-14B            ★ FP8 AOTI ZeroGPU
+  cogvideox         → THUDM/CogVideoX-5B-Space         ★ 5B (upgrade 2B→5B)
+  animatediff       → ByteDance/AnimateDiff-Lightning  ✅ 4-step rapide
+  pollinations-vid  → gen.pollinations.ai/v1/video     ✅ sans clé
+  pollinations-img  → image.pollinations.ai            ✅ sans clé
+  hunyuan           → tencent/HunyuanVideo              ✅ ZeroGPU sans clé
 
-  CORRECTIONS CRITIQUES V8.1
-  ──────────────────────────
-  [1] Noms d'API réels vérifiés via client.view_api()
-  [2] Résultats copiés dans outputs/ immédiatement (évite expiration HF)
-  [3] Reconnexion SSE automatique côté frontend
-  [4] Fallback automatique si branche échoue
+  ÉVOLUTIONS V9
+  ──────────────
+  [1] LTX-Video distilled = branche primaire (intent "studio" + défaut t2v)
+  [2] Wan2.2 T2V-14B FP8 AOTI — endpoint mis à jour
+  [3] CogVideoX-5B — upgrade depuis 2B
+  [4] HunyuanVideo — 7e branche ZeroGPU sans token
+  [5] Cascade 7 endpoints : ltx→wan22→cogvideox→animatediff→pollinations-vid
+  [6] Intent "studio" = LTX primaire automatique
 ================================================================================
 """
 
@@ -71,15 +74,17 @@ SEMS = {
     "animatediff":      asyncio.Semaphore(3),
     "wan22":            asyncio.Semaphore(2),
     "ltx":              asyncio.Semaphore(2),
+    "hunyuan":          asyncio.Semaphore(2),
     "local":            asyncio.Semaphore(1),
 }
 
-# Ordre de fallback si une branche échoue
+# Cascade V9 : ltx → wan22 → cogvideox → animatediff → pollinations-vid
 FALLBACK = {
+    "ltx":        "wan22",
     "wan22":      "cogvideox",
-    "ltx":        "cogvideox",
     "cogvideox":  "animatediff",
     "animatediff":"pollinations-vid",
+    "hunyuan":    "cogvideox",
 }
 
 
@@ -213,45 +218,42 @@ async def gen_pollinations_video(cid, prompt):
 
 def _call_cogvideox(prompt, steps=50, guidance=6.0):
     """
-    ✅ ENDPOINT VÉRIFIÉ : zai-org/CogVideoX-2B-Space
+    ★ V9 UPGRADE : THUDM/CogVideoX-5B-Space (5B au lieu de 2B)
     api_name="/generate"
     Retourne tuple (dict(video=filepath, subtitles=...), filepath_mp4, filepath_gif)
     """
     kw = {}
     if HF_TOKEN:
         kw["hf_token"] = HF_TOKEN
-    c = Client("zai-org/CogVideoX-2B-Space", verbose=False, **kw)
+    c = Client("THUDM/CogVideoX-5B-Space", verbose=False, **kw)
     result = c.predict(
         prompt=prompt,
         num_inference_steps=float(steps),
         guidance_scale=float(guidance),
         api_name="/generate"
     )
-    # result[0] = dict(video=local_filepath, subtitles=...)
     path = extract_video_path(result)
     if path and Path(path).exists():
         return save_to_outputs(path, ".mp4")
-    # Fallback : result[1] est direct filepath mp4
     if isinstance(result, (list, tuple)) and len(result) > 1:
         path2 = result[1]
         if path2 and Path(str(path2)).exists():
             return save_to_outputs(str(path2), ".mp4")
-    raise RuntimeError("CogVideoX : aucun fichier vidéo récupéré")
+    raise RuntimeError("CogVideoX-5B : aucun fichier vidéo récupéré")
 
 
 async def gen_cogvideox(cid, prompt, steps=50):
-    """✅ Branche principale — CogVideoX-2B via HF Space."""
+    """★ V9 — CogVideoX-5B via HF Space ZeroGPU (fallback cascade)."""
     t = time.time()
     upd(cid, status="running", started_at=t,
-        step="Connexion CogVideoX Space…", progress=5)
+        step="Connexion CogVideoX-5B Space…", progress=5)
     tick = asyncio.create_task(tick_loop(cid, t))
 
-    # Progression simulée pendant l'attente (Space = boîte noire)
     async def fake_progress():
         steps_ui = [
-            (15, "Chargement CogVideoX-2B…"),
+            (15, "Chargement CogVideoX-5B…"),
             (30, "Encodage du prompt…"),
-            (55, "Génération des frames (GPU A10G)…"),
+            (55, "Génération des frames (ZeroGPU)…"),
             (80, "Décodage vidéo…"),
             (92, "Assemblage MP4…"),
         ]
@@ -268,7 +270,7 @@ async def gen_cogvideox(cid, prompt, steps=50):
         upd(cid, progress=100, step="Vidéo prête ✓", status="done", result=url)
     except Exception as e:
         prog_task.cancel()
-        upd(cid, status="error", error=f"CogVideoX: {e}")
+        upd(cid, status="error", error=f"CogVideoX-5B: {e}")
     finally:
         tick.cancel()
 
@@ -335,15 +337,20 @@ def _call_hf_space_generic(space_id, api_name, **kwargs):
 
 
 async def gen_wan22(cid, prompt, image_url=None):
-    """⚠  Wan2.2 — nécessite HF_TOKEN valide et Space actif."""
+    """★ V9 — Wan2.2 T2V-14B FP8 AOTI ZeroGPU (2e rang cascade)."""
     t = time.time()
     upd(cid, status="running", started_at=t,
-        step="Connexion Wan2.2 Space…", progress=5)
+        step="Connexion Wan2.2 T2V-14B…", progress=5)
     tick = asyncio.create_task(tick_loop(cid, t))
 
     async def fake_progress():
-        for prog, label in [(15,"Chargement Wan2.2-TI2V-5B…"),(40,"Encodage…"),(70,"Génération 720P…"),(90,"Assemblage…")]:
-            if CLIPS.get(cid,{}).get("status") != "running": break
+        for prog, label in [
+            (15, "Chargement Wan2.2-T2V-14B FP8…"),
+            (35, "Encodage texte→latent…"),
+            (60, "Génération 720P (ZeroGPU)…"),
+            (85, "Décodage + assemblage…"),
+        ]:
+            if CLIPS.get(cid, {}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
             await asyncio.sleep(25)
 
@@ -356,10 +363,10 @@ async def gen_wan22(cid, prompt, image_url=None):
             kw["image"] = handle_file(image_url)
             api = "/generate_i2v"
         url = await loop.run_in_executor(
-            None, lambda: _call_hf_space_generic("Wan-AI/Wan-2.2-5B", api, **kw)
+            None, lambda: _call_hf_space_generic("Wan-AI/Wan2.2-T2V-14B", api, **kw)
         )
         prog_task.cancel()
-        upd(cid, progress=100, step="Vidéo Wan2.2 prête ✓", status="done", result=url)
+        upd(cid, progress=100, step="Vidéo Wan2.2 14B prête ✓", status="done", result=url)
     except Exception as e:
         prog_task.cancel()
         upd(cid, status="error", error=str(e))
@@ -368,36 +375,88 @@ async def gen_wan22(cid, prompt, image_url=None):
 
 
 async def gen_ltx(cid, prompt, image_url=None):
-    """⚠  LTX-Video — nécessite HF_TOKEN valide et Space actif."""
+    """★ V9 PRIMAIRE — LTX-Video distilled ZeroGPU (Lightricks/LTX-Video-Distilled)."""
     t = time.time()
     upd(cid, status="running", started_at=t,
-        step="Connexion LTX-Video Space…", progress=5)
+        step="Connexion LTX-Video Distilled…", progress=5)
     tick = asyncio.create_task(tick_loop(cid, t))
 
     async def fake_progress():
-        for prog, label in [(20,"Chargement LTX 13B…"),(50,"DiT 30fps…"),(85,"Rendu HD…")]:
-            if CLIPS.get(cid,{}).get("status") != "running": break
+        for prog, label in [
+            (15, "Chargement LTX Distilled…"),
+            (40, "DiT distilled — 8 steps 30fps…"),
+            (70, "Rendu 1216×704…"),
+            (90, "Encodage MP4…"),
+        ]:
+            if CLIPS.get(cid, {}).get("status") != "running": break
+            upd(cid, progress=prog, step=label)
+            await asyncio.sleep(12)
+
+    prog_task = asyncio.create_task(fake_progress())
+    loop = asyncio.get_event_loop()
+    try:
+        kw = {"prompt": prompt, "seed": 369, "guidance_scale": 1.0,
+              "height": 704, "width": 1216, "num_frames": 121}
+        api = "/text_to_video"
+        if image_url:
+            kw = {"prompt": prompt, "image": handle_file(image_url),
+                  "seed": 369, "guidance_scale": 1.0}
+            api = "/image_to_video"
+        url = await loop.run_in_executor(
+            None, lambda: _call_hf_space_generic("Lightricks/LTX-Video-Distilled", api, **kw)
+        )
+        prog_task.cancel()
+        upd(cid, progress=100, step="Vidéo LTX Distilled prête ✓", status="done", result=url)
+    except Exception as e:
+        prog_task.cancel()
+        upd(cid, status="error", error=str(e))
+    finally:
+        tick.cancel()
+
+
+def _call_hunyuan(prompt, steps=20):
+    """★ V9 — HunyuanVideo ZeroGPU sans token requis."""
+    kw = {}
+    if HF_TOKEN:
+        kw["hf_token"] = HF_TOKEN
+    c = Client("tencent/HunyuanVideo", verbose=False, **kw)
+    result = c.predict(
+        prompt=prompt,
+        num_inference_steps=steps,
+        api_name="/generate"
+    )
+    path = extract_video_path(result)
+    if path and Path(str(path)).exists():
+        return save_to_outputs(str(path), ".mp4")
+    raise RuntimeError("HunyuanVideo : aucun fichier récupéré")
+
+
+async def gen_hunyuan(cid, prompt):
+    """★ V9 — HunyuanVideo (7e branche ZeroGPU)."""
+    t = time.time()
+    upd(cid, status="running", started_at=t,
+        step="Connexion HunyuanVideo…", progress=5)
+    tick = asyncio.create_task(tick_loop(cid, t))
+
+    async def fake_progress():
+        for prog, label in [
+            (20, "Chargement HunyuanVideo…"),
+            (45, "Génération frames ZeroGPU…"),
+            (80, "Assemblage MP4…"),
+        ]:
+            if CLIPS.get(cid, {}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
             await asyncio.sleep(20)
 
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
     try:
-        kw = {"prompt": prompt, "seed": 369, "guidance_scale": 3.0,
-              "height": 704, "width": 1216, "num_frames": 121}
-        api = "/text_to_video"
-        if image_url:
-            kw = {"prompt": prompt, "image": handle_file(image_url),
-                  "seed": 369, "guidance_scale": 3.0}
-            api = "/image_to_video"
-        url = await loop.run_in_executor(
-            None, lambda: _call_hf_space_generic("Lightricks/LTX-Video", api, **kw)
-        )
+        url = await loop.run_in_executor(None, _call_hunyuan, prompt, 20)
         prog_task.cancel()
-        upd(cid, progress=100, step="Vidéo LTX prête ✓", status="done", result=url)
+        upd(cid, progress=100, step="Vidéo HunyuanVideo prête ✓", status="done", result=url)
     except Exception as e:
         prog_task.cancel()
-        upd(cid, status="error", error=str(e))
+        upd(cid, status="error", error=f"HunyuanVideo: {e}")
     finally:
         tick.cancel()
 
@@ -441,8 +500,10 @@ async def _execute_branch(cid, branch, prompt, image):
         await gen_wan22(cid, prompt, image)
     elif branch == "ltx":
         await gen_ltx(cid, prompt, image)
+    elif branch == "hunyuan":
+        await gen_hunyuan(cid, prompt)
     else:
-        await gen_cogvideox(cid, prompt)   # défaut sûr
+        await gen_ltx(cid, prompt, image)   # V9 : LTX comme défaut sûr
 
 
 def auto_branch(intent, index, total):
@@ -452,9 +513,12 @@ def auto_branch(intent, index, total):
     if intent == "cinematic": return "cogvideox"
     if intent == "wan":       return "wan22"
     if intent == "hd30fps":   return "ltx"
+    if intent == "studio":    return "ltx"    # V9 : intent studio = LTX distilled
+    if intent == "hunyuan":   return "hunyuan"
     if intent == "mix":
-        return ["cogvideox", "animatediff", "pollinations-vid"][index % 3]
-    return "cogvideox"   # défaut le plus fiable confirmé
+        # V9 : mix tourne sur les 3 meilleures branches
+        return ["ltx", "wan22", "cogvideox"][index % 3]
+    return "ltx"   # V9 : LTX distilled = nouveau défaut
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -471,28 +535,32 @@ async def handle_index(request):
 
 async def handle_health(request):
     return web.json_response({
-        "status": "ok", "version": "V8.1-PARALLEL",
+        "status": "ok", "version": "V9.0-STUDIO-QUANTIQUE",
         "port": PORT, "gradio": HAS_GRADIO, "hf_token": bool(HF_TOKEN),
         "workers_active": sum(1 for c in CLIPS.values() if c["status"]=="running"),
         "clips_done": sum(1 for c in CLIPS.values() if c["status"]=="done"),
         "outputs_count": len(list(OUTPUTS.glob("*"))),
-        "branches_confirmed": ["pollinations-img","pollinations-vid","cogvideox","animatediff"],
-        "branches_need_token": ["wan22","ltx"],
+        "primary_branch": "ltx-distilled",
+        "cascade": ["ltx","wan22","cogvideox","animatediff","pollinations-vid"],
+        "branches_zerogpu": ["ltx","wan22","cogvideox","hunyuan"],
+        "branches_no_token": ["pollinations-img","pollinations-vid","animatediff","hunyuan"],
         "sig": "Tik Tik Tik — Le UN ⚡"
     }, headers=CORS)
 
 async def handle_capabilities(request):
     return web.json_response({
         "branches": [
-            {"id":"pollinations-img","name":"Pollinations Images","ready":True,"token_required":False,"confirmed":True},
-            {"id":"pollinations-vid","name":"Pollinations Vidéo","ready":True,"token_required":False,"confirmed":True,"note":"alpha"},
-            {"id":"cogvideox","name":"CogVideoX-2B (HF Space)","ready":HAS_GRADIO,"token_required":False,"confirmed":True},
-            {"id":"animatediff","name":"AnimateDiff-Lightning (HF Space)","ready":HAS_GRADIO,"token_required":False,"confirmed":True,"note":"rapide 4-step"},
-            {"id":"wan22","name":"Wan2.2 TI2V-5B (HF Space)","ready":bool(HF_TOKEN),"token_required":True,"confirmed":False,"note":"Space parfois pausé"},
-            {"id":"ltx","name":"LTX-Video 0.9.7 (HF Space)","ready":bool(HF_TOKEN),"token_required":True,"confirmed":False},
+            {"id":"ltx","name":"LTX-Video Distilled ★ PRIMAIRE","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":1,"note":"8-step distilled 30fps"},
+            {"id":"wan22","name":"Wan2.2 T2V-14B FP8 AOTI","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":2,"note":"720P 14B optimisé"},
+            {"id":"cogvideox","name":"CogVideoX-5B (upgrade 2B→5B)","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":3},
+            {"id":"animatediff","name":"AnimateDiff-Lightning","ready":HAS_GRADIO,"token_required":False,"zerogpu":False,"rank":4,"note":"rapide 4-step"},
+            {"id":"hunyuan","name":"HunyuanVideo ZeroGPU","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":5},
+            {"id":"pollinations-vid","name":"Pollinations Vidéo","ready":True,"token_required":False,"zerogpu":False,"rank":6,"note":"sans clé"},
+            {"id":"pollinations-img","name":"Pollinations Images","ready":True,"token_required":False,"zerogpu":False,"rank":7},
         ],
         "fallback_chains": FALLBACK,
         "parallel_mode": True,
+        "intents": ["studio","cinematic","fast","wan","hd30fps","hunyuan","draft","image","mix","t2v"],
     }, headers=CORS)
 
 async def handle_produce(request):
@@ -671,13 +739,13 @@ def create_app():
 
 if __name__ == "__main__":
     print("""
-╔═══════════════════════════════════════════════════╗
-║  ⚡ TESLA GO V8.1 — CONSOLE DE PRODUCTION         ║
-║  Endpoints vérifiés · Sauvegarde immédiate        ║
-║  Fallback auto · SSE keep-alive                   ║
-║  Port 8369 · LMDB17 / etheravolt.fr              ║
-║  Tik Tik Tik — Le UN ⚡                          ║
-╚═══════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════╗
+║  ⚡ TESLA GO V9 — STUDIO QUANTIQUE                   ║
+║  LTX Distilled ★ · Wan2.2 14B · CogVideoX-5B        ║
+║  HunyuanVideo · 7 branches · Cascade ZeroGPU        ║
+║  Zéro coût absolu · Port 8369 · LMDB17              ║
+║  Tik Tik Tik — Le UN ⚡                             ║
+╚══════════════════════════════════════════════════════╝
     """)
     if not HF_TOKEN:
         print("⚠  HF_TOKEN absent → CogVideoX et AnimateDiff fonctionnent quand même")
