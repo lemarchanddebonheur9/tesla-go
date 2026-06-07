@@ -177,27 +177,37 @@ def extract_video_path(result) -> str | None:
 
 async def gen_pollinations_image(cid, prompt, model="flux",
                                   width=1024, height=1024):
-    """✅ Confirmé — aucune clé requise."""
+    """✅ Pollinations image — sans nologo (paywall), retry x3 si rate-limit."""
     import urllib.parse
     t = time.time()
     upd(cid, status="running", started_at=t,
         step="Génération image Pollinations…", progress=10)
     tick = asyncio.create_task(tick_loop(cid, t))
+    # seed variable pour éviter le cache et contourner la file par IP
+    seed = int(time.time()) % 100000
+    url = (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
+           f"?model={model}&width={width}&height={height}&seed={seed}&nofeed=true")
     try:
-        url = (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
-               f"?model={model}&width={width}&height={height}&seed=369&nologo=true")
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=45)) as r:
-                if r.status == 200:
-                    # Sauvegarder l'image localement
-                    fname = f"{uuid.uuid4().hex[:12]}.jpg"
-                    dest  = OUTPUTS / fname
-                    dest.write_bytes(await r.read())
-                    local_url = f"http://127.0.0.1:{PORT}/outputs/{fname}"
-                    upd(cid, progress=100, step="Image prête ✓",
-                        status="done", result=local_url)
-                else:
-                    raise RuntimeError(f"Pollinations HTTP {r.status}")
+        last_err = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(10 * attempt)   # backoff 10s, 20s
+                upd(cid, step=f"Retry Pollinations {attempt+1}/3…", progress=10+attempt*10)
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=90)) as r:
+                        if r.status == 200:
+                            fname = f"{uuid.uuid4().hex[:12]}.jpg"
+                            dest  = OUTPUTS / fname
+                            dest.write_bytes(await r.read())
+                            local_url = f"http://127.0.0.1:{PORT}/outputs/{fname}"
+                            upd(cid, progress=100, step="Image prête ✓",
+                                status="done", result=local_url)
+                            return
+                        last_err = f"Pollinations HTTP {r.status}"
+            except Exception as e:
+                last_err = str(e)
+        raise RuntimeError(last_err or "Pollinations image : échec après 3 tentatives")
     except Exception as e:
         upd(cid, status="error", error=str(e))
     finally:
@@ -268,16 +278,17 @@ async def gen_cogvideox(cid, prompt, steps=50):
 
     async def fake_progress():
         steps_ui = [
-            (15, "Chargement CogVideoX-5B…"),
-            (30, "Encodage du prompt…"),
-            (55, "Génération des frames (ZeroGPU)…"),
+            (10, "Connexion ZeroGPU…"),
+            (20, "Chargement CogVideoX-5B (cold start ~2min)…"),
+            (40, "Encodage du prompt…"),
+            (60, "Génération des frames…"),
             (80, "Décodage vidéo…"),
             (92, "Assemblage MP4…"),
         ]
         for prog, label in steps_ui:
             if CLIPS.get(cid, {}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
-            await asyncio.sleep(20)
+            await asyncio.sleep(40)   # 40s entre étapes = ~4min max
 
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
@@ -319,10 +330,14 @@ async def gen_animatediff(cid, prompt, base="epiCRealism"):
     tick = asyncio.create_task(tick_loop(cid, t))
 
     async def fake_progress():
-        for prog, label in [(20,"Chargement modèle…"),(50,"Génération 4-step…"),(80,"Rendu GIF→MP4…")]:
+        for prog, label in [
+            (15, "Chargement AnimateDiff (cold start)…"),
+            (50, "Génération 4-step…"),
+            (85, "Rendu GIF→MP4…"),
+        ]:
             if CLIPS.get(cid,{}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
-            await asyncio.sleep(8)
+            await asyncio.sleep(30)
 
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
@@ -449,14 +464,15 @@ async def gen_ltx(cid, prompt, image_url=None):
 
     async def fake_progress():
         for prog, label in [
-            (15, "Chargement LTX Distilled…"),
-            (40, "DiT distilled — 8 steps 30fps…"),
-            (70, "Rendu 704×512…"),
-            (90, "Encodage MP4…"),
+            (10, "Connexion ZeroGPU…"),
+            (20, "Chargement LTX Distilled (cold start ~2min)…"),
+            (45, "DiT distilled — 8 steps 30fps…"),
+            (75, "Rendu 704×512…"),
+            (92, "Encodage MP4…"),
         ]:
             if CLIPS.get(cid, {}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
-            await asyncio.sleep(12)
+            await asyncio.sleep(40)   # patience cold start
 
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
