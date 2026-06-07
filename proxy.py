@@ -188,26 +188,39 @@ async def gen_pollinations_image(cid, prompt, model="flux",
     url = (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
            f"?model={model}&width={width}&height={height}&seed={seed}&nofeed=true")
     try:
+        # 1. Tentative Pollinations (2 essais, pas 3 — évite le ban prolongé)
         last_err = None
-        for attempt in range(3):
+        for attempt in range(2):
             if attempt:
-                await asyncio.sleep(10 * attempt)   # backoff 10s, 20s
-                upd(cid, step=f"Retry Pollinations {attempt+1}/3…", progress=10+attempt*10)
+                await asyncio.sleep(15)
+                upd(cid, step="Retry Pollinations 2/2…", progress=20)
             try:
                 async with aiohttp.ClientSession() as s:
-                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=90)) as r:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
                         if r.status == 200:
                             fname = f"{uuid.uuid4().hex[:12]}.jpg"
                             dest  = OUTPUTS / fname
                             dest.write_bytes(await r.read())
-                            local_url = f"http://127.0.0.1:{PORT}/outputs/{fname}"
                             upd(cid, progress=100, step="Image prête ✓",
-                                status="done", result=local_url)
+                                status="done", result=f"http://127.0.0.1:{PORT}/outputs/{fname}")
                             return
                         last_err = f"Pollinations HTTP {r.status}"
             except Exception as e:
                 last_err = str(e)
-        raise RuntimeError(last_err or "Pollinations image : échec après 3 tentatives")
+
+        # 2. Fallback Picsum (photos libres, zéro API key, toujours dispo)
+        upd(cid, step="Fallback Picsum Photos…", progress=50)
+        picsum_url = f"https://picsum.photos/seed/{seed}/1280/720"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(picsum_url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status == 200:
+                    fname = f"{uuid.uuid4().hex[:12]}_picsum.jpg"
+                    dest  = OUTPUTS / fname
+                    dest.write_bytes(await r.read())
+                    upd(cid, progress=100, step="Image Picsum prête ✓",
+                        status="done", result=f"http://127.0.0.1:{PORT}/outputs/{fname}")
+                    return
+        raise RuntimeError(f"Image impossible (Pollinations: {last_err}, Picsum KO)")
     except Exception as e:
         upd(cid, status="error", error=str(e))
     finally:
@@ -406,12 +419,20 @@ async def gen_wan22(cid, prompt, image_url=None):
 
 
 def _gradio_client(space_id: str):
-    """Client Gradio avec timeout étendu (évite cold-start timeouts sur ZeroGPU)."""
+    """Client Gradio avec timeout étendu pour cold-start ZeroGPU (~2-5 min)."""
     kw = {"verbose": False}
     if HF_TOKEN:
         kw["hf_token"] = HF_TOKEN
     try:
+        import httpx
+        kw["httpx_kwargs"] = {"timeout": httpx.Timeout(360.0)}  # 6 min max
         return Client(space_id, **kw)
+    except TypeError:
+        # Ancienne version gradio_client sans httpx_kwargs
+        try:
+            return Client(space_id, **{k: v for k, v in kw.items() if k != "httpx_kwargs"})
+        except Exception as e:
+            raise RuntimeError(f"Connexion {space_id} impossible : {e}")
     except Exception as e:
         raise RuntimeError(f"Connexion {space_id} impossible : {e}")
 
