@@ -79,14 +79,27 @@ SEMS = {
     "local":            asyncio.Semaphore(1),
 }
 
-# Cascade V9 : ltx → wan22 → cogvideox → animatediff → pollinations-vid
-FALLBACK = {
-    "ltx":        "wan22",
-    "wan22":      "cogvideox",
-    "cogvideox":  "animatediff",
-    "animatediff":"pollinations-vid",
-    "hunyuan":    "cogvideox",
-}
+# Cascade V9 — adapte dynamiquement selon HF_TOKEN présent ou non
+def _build_fallback():
+    if HF_TOKEN:
+        # Avec token : cascade complète
+        return {
+            "ltx":        "wan22",
+            "wan22":      "cogvideox",
+            "cogvideox":  "animatediff",
+            "animatediff":"pollinations-vid",
+            "hunyuan":    "cogvideox",
+        }
+    else:
+        # Sans token : on saute wan22 et hunyuan (toujours gated)
+        return {
+            "ltx":        "cogvideox",
+            "cogvideox":  "animatediff",
+            "animatediff":"pollinations-vid",
+            "hunyuan":    "cogvideox",
+        }
+
+FALLBACK = _build_fallback()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -510,20 +523,25 @@ async def run_clip(cid: str):
     prompt = clip["prompt"]
     image  = clip.get("image")
 
-    sem = SEMS.get(branch, SEMS["cogvideox"])
-    async with sem:
-        await _execute_branch(cid, branch, prompt, image)
+    # Cascade complète : parcourt tous les fallbacks jusqu'à succès ou épuisement
+    visited = set()
+    current = branch
+    while current and current not in visited:
+        visited.add(current)
+        sem = SEMS.get(current, SEMS["cogvideox"])
+        async with sem:
+            await _execute_branch(cid, current, prompt, image)
 
-        # FALLBACK AUTOMATIQUE si erreur
-        if CLIPS[cid]["status"] == "error":
-            fb = FALLBACK.get(branch)
-            if fb:
-                log.warning(f"Clip {cid} : fallback {branch} → {fb}")
-                CLIPS[cid]["status"] = "running"
-                CLIPS[cid]["error"]  = None
-                upd(cid, branch=fb, step=f"Fallback vers {fb}…", progress=0)
-                async with SEMS.get(fb, SEMS["cogvideox"]):
-                    await _execute_branch(cid, fb, prompt, image)
+        if CLIPS[cid]["status"] != "error":
+            break   # succès ou en cours — on sort
+
+        next_branch = FALLBACK.get(current)
+        if next_branch:
+            log.warning(f"Clip {cid} : fallback {current} → {next_branch}")
+            CLIPS[cid]["status"] = "running"
+            CLIPS[cid]["error"]  = None
+            upd(cid, branch=next_branch, step=f"Fallback {current} → {next_branch}…", progress=0)
+        current = next_branch
 
 
 async def _execute_branch(cid, branch, prompt, image):
