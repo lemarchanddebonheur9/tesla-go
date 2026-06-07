@@ -188,15 +188,15 @@ async def gen_pollinations_image(cid, prompt, model="flux",
     url = (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
            f"?model={model}&width={width}&height={height}&seed={seed}&nofeed=true")
     try:
-        # 1. Tentative Pollinations (2 essais, pas 3 — évite le ban prolongé)
+        # 1. Tentative Pollinations (1 essai rapide, 8s timeout — Picsum en fallback immédiat)
         last_err = None
-        for attempt in range(2):
+        for attempt in range(1):
             if attempt:
-                await asyncio.sleep(15)
+                await asyncio.sleep(3)
                 upd(cid, step="Retry Pollinations 2/2…", progress=20)
             try:
                 async with aiohttp.ClientSession() as s:
-                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
                         if r.status == 200:
                             fname = f"{uuid.uuid4().hex[:12]}.jpg"
                             dest  = OUTPUTS / fname
