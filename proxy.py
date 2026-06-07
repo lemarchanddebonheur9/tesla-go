@@ -92,10 +92,11 @@ def _build_fallback():
         }
     else:
         # Sans token : on saute wan22 et hunyuan (toujours gated)
+        # pollinations-vid est 404 → fallback final = pollinations-img (toujours dispo)
         return {
             "ltx":        "cogvideox",
             "cogvideox":  "animatediff",
-            "animatediff":"pollinations-vid",
+            "animatediff":"pollinations-img",
             "hunyuan":    "cogvideox",
         }
 
@@ -236,10 +237,7 @@ def _call_cogvideox(prompt, steps=50, guidance=6.0):
     api_name="/generate" — image_input/video_input passés à None pour T2V
     Retourne tuple (dict(video=...), download_mp4, download_gif, seed)
     """
-    kw = {}
-    if HF_TOKEN:
-        kw["hf_token"] = HF_TOKEN
-    c = Client("THUDM/CogVideoX-5B-Space", verbose=False, **kw)
+    c = _gradio_client("THUDM/CogVideoX-5B-Space")
     result = c.predict(
         prompt=prompt,
         image_input=None,
@@ -300,10 +298,7 @@ def _call_animatediff(prompt, base="epiCRealism", motion="", step="4"):
     api_name="/generate_image"
     Retourne Dict(video=filepath, subtitles=filepath|None)
     """
-    kw = {}
-    if HF_TOKEN:
-        kw["hf_token"] = HF_TOKEN
-    c = Client("ByteDance/AnimateDiff-Lightning", verbose=False, **kw)
+    c = _gradio_client("ByteDance/AnimateDiff-Lightning")
     result = c.predict(
         prompt=prompt,
         base=base,
@@ -315,7 +310,6 @@ def _call_animatediff(prompt, base="epiCRealism", motion="", step="4"):
     if path and Path(str(path)).exists():
         return save_to_outputs(str(path), ".mp4")
     raise RuntimeError("AnimateDiff : aucun fichier vidéo récupéré")
-
 
 async def gen_animatediff(cid, prompt, base="epiCRealism"):
     """✅ Branche rapide — AnimateDiff-Lightning (4 steps, ~30s)."""
@@ -353,6 +347,9 @@ def _call_hf_space_generic(space_id, api_name, **kwargs):
     if path and Path(str(path)).exists():
         return save_to_outputs(str(path), ".mp4")
     raise RuntimeError(f"{space_id} : aucun fichier récupéré")
+
+
+HF_CLIENT_TIMEOUT = int(os.environ.get("HF_CLIENT_TIMEOUT", "600"))
 
 
 async def gen_wan22(cid, prompt, image_url=None):
@@ -393,6 +390,17 @@ async def gen_wan22(cid, prompt, image_url=None):
         tick.cancel()
 
 
+def _gradio_client(space_id: str):
+    """Client Gradio avec timeout étendu (évite cold-start timeouts sur ZeroGPU)."""
+    kw = {"verbose": False}
+    if HF_TOKEN:
+        kw["hf_token"] = HF_TOKEN
+    try:
+        return Client(space_id, **kw)
+    except Exception as e:
+        raise RuntimeError(f"Connexion {space_id} impossible : {e}")
+
+
 def _call_ltx(prompt, image_url=None):
     """
     ★ V9 CORRIGÉ — LTX-Video-Distilled signature réelle vérifiée via view_api().
@@ -401,10 +409,7 @@ def _call_ltx(prompt, image_url=None):
             seed_ui, randomize_seed, ui_guidance_scale, improve_texture_flag
     Retourne: (dict(video=filepath, subtitles=...), seed)
     """
-    kw = {}
-    if HF_TOKEN:
-        kw["hf_token"] = HF_TOKEN
-    c = Client("Lightricks/LTX-Video-Distilled", verbose=False, **kw)
+    c = _gradio_client("Lightricks/LTX-Video-Distilled")
     api = "/text_to_video"
     kwargs = dict(
         prompt=prompt,
