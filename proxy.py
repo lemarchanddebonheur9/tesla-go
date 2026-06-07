@@ -188,15 +188,15 @@ async def gen_pollinations_image(cid, prompt, model="flux",
     url = (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
            f"?model={model}&width={width}&height={height}&seed={seed}&nofeed=true")
     try:
-        # 1. Tentative Pollinations (2 essais, pas 3 — évite le ban prolongé)
+        # 1. Tentative Pollinations (1 essai rapide, 8s timeout — Picsum en fallback immédiat)
         last_err = None
-        for attempt in range(2):
+        for attempt in range(1):
             if attempt:
-                await asyncio.sleep(15)
+                await asyncio.sleep(3)
                 upd(cid, step="Retry Pollinations 2/2…", progress=20)
             try:
                 async with aiohttp.ClientSession() as s:
-                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
                         if r.status == 200:
                             fname = f"{uuid.uuid4().hex[:12]}.jpg"
                             dest  = OUTPUTS / fname
@@ -701,11 +701,29 @@ async def generate_tts(text: str, out_path: str,
 COMPOSE_JOBS = {}
 
 
+async def _gen_clip_for_compose(job_id: str, seg_idx: int, prompt: str,
+                                 intent: str = "studio") -> str | None:
+    """Generate one video clip for a compose segment using the full cascade."""
+    branch = auto_branch(intent, seg_idx, 1)
+    cid = new_clip(f"cmp{job_id[:4]}", prompt, branch, intent, seg_idx)
+    await run_clip(cid)
+    clip = CLIPS.get(cid, {})
+    if clip.get("status") == "done" and clip.get("result"):
+        result = clip["result"]
+        if result.startswith("http://127.0.0.1"):
+            fname = result.split("/outputs/")[-1]
+            local = OUTPUTS / fname
+            if local.exists():
+                return str(local)
+        return result
+    return None
+
+
 async def run_compose(job_id: str, segments: list, voice_edge: str):
     """
     Pipeline complet :
       1. Pour chaque segment : TTS → audio WAV/MP3
-      2. Optionnel : générer clip vidéo si prompt fourni
+      2. Clip vidéo : clip_url fourni OU généré via cascade depuis prompt
       3. FFmpeg : assembler audio + clip → segment MP4
       4. FFmpeg : concat tous les segments → épisode final MP4
     """
@@ -723,6 +741,7 @@ async def run_compose(job_id: str, segments: list, voice_edge: str):
         for i, seg in enumerate(segments):
             text   = seg.get("text", "").strip()
             prompt = seg.get("prompt", "").strip()
+            intent = seg.get("intent", "studio")
             dur    = float(seg.get("duration", 5))
             pct_base = int(i / total * 80)
 
@@ -737,12 +756,17 @@ async def run_compose(job_id: str, segments: list, voice_edge: str):
             else:
                 audio_path = None
 
-            # ── Clip vidéo (optionnel) ────────────────────────────────────
-            clip_path = seg.get("clip_url")   # URL locale /outputs/xxx.mp4
+            # ── Clip vidéo : clip_url fourni ou généré depuis prompt ──────
+            clip_path = seg.get("clip_url")
             if clip_path and clip_path.startswith("http://127.0.0.1"):
                 fname = clip_path.split("/outputs/")[-1]
                 local  = OUTPUTS / fname
                 clip_path = str(local) if local.exists() else None
+
+            if not clip_path and prompt:
+                upd_job(step=f"[{i+1}/{total}] Génération clip ({intent})…",
+                        progress=pct_base + 2)
+                clip_path = await _gen_clip_for_compose(job_id, i, prompt, intent)
 
             # ── Durée audio réelle ─────────────────────────────────────────
             real_dur = dur
