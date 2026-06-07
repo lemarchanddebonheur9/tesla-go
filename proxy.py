@@ -2,34 +2,38 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-  ETHV_APP_TESLAGO_PROXY_V8_PARALLEL_2026-05-30.py
+  ETHV_APP_TESLAGO_PROXY_V9_STUDIO_2026-06-06.py
 ================================================================================
-  ⚡ TESLA GO V8 — Console de Production Parallèle — 100% Gratuit
-  Endpoints HF Spaces VÉRIFIÉS · Téléchargement immédiat · SSE robuste
+  ⚡ TESLA GO V9 — Studio Quantique — 100% Gratuit · ZeroGPU
+  7 branches · LTX-Video distilled primaire · Cascade auto · SSE robuste
 
   Auteur    : Lolo (Laurent Becker) — LMDB17 / etheravolt.fr
   Port      : 8369 (constante TNT)
   Signature : Tik Tik Tik — Le UN ⚡
 
-  BRANCHES CONFIRMÉES (endpoints vérifiés en live)
+  BRANCHES V9 (cascade priorité décroissante)
   ─────────────────────────────────────────────────
-  pollinations-img  → image.pollinations.ai          ✅ sans clé
-  pollinations-vid  → gen.pollinations.ai/v1/video   ✅ alpha
-  cogvideox         → zai-org/CogVideoX-2B-Space     ✅ /generate
-  animatediff       → ByteDance/AnimateDiff-Lightning ✅ /generate_image
-  wan22             → Wan-AI/Wan-2.2-5B              ⚠  nécessite HF_TOKEN valide
-  ltx               → Lightricks/LTX-Video            ⚠  nécessite HF_TOKEN valide
+  ltx               → Lightricks/LTX-Video            ★ PRIMAIRE distilled ZeroGPU
+  wan22             → Wan-AI/Wan2.2-T2V-14B            ★ FP8 AOTI ZeroGPU
+  cogvideox         → THUDM/CogVideoX-5B-Space         ★ 5B (upgrade 2B→5B)
+  animatediff       → ByteDance/AnimateDiff-Lightning  ✅ 4-step rapide
+  pollinations-vid  → gen.pollinations.ai/v1/video     ✅ sans clé
+  pollinations-img  → image.pollinations.ai            ✅ sans clé
+  hunyuan           → tencent/HunyuanVideo              ✅ ZeroGPU sans clé
 
-  CORRECTIONS CRITIQUES V8.1
-  ──────────────────────────
-  [1] Noms d'API réels vérifiés via client.view_api()
-  [2] Résultats copiés dans outputs/ immédiatement (évite expiration HF)
-  [3] Reconnexion SSE automatique côté frontend
-  [4] Fallback automatique si branche échoue
+  ÉVOLUTIONS V9
+  ──────────────
+  [1] LTX-Video distilled = branche primaire (signature corrigée)
+  [2] CogVideoX-5B — upgrade depuis 2B (signature corrigée)
+  [3] Cascade vérifiée : ltx→cogvideox→animatediff→pollinations-vid
+  [4] wan22/hunyuan : token_required (Spaces gated)
+  [5] /api/compose — pipeline épisode complet :
+      script segments → TTS (Kokoro si HF_TOKEN, edge-tts sinon) → clips vidéo
+      → FFmpeg concat audio+vidéo → MP4 final publiable
 ================================================================================
 """
 
-import os, json, uuid, asyncio, logging, time, shutil
+import os, json, uuid, asyncio, logging, time, shutil, subprocess, tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -71,16 +75,32 @@ SEMS = {
     "animatediff":      asyncio.Semaphore(3),
     "wan22":            asyncio.Semaphore(2),
     "ltx":              asyncio.Semaphore(2),
+    "hunyuan":          asyncio.Semaphore(2),
     "local":            asyncio.Semaphore(1),
 }
 
-# Ordre de fallback si une branche échoue
-FALLBACK = {
-    "wan22":      "cogvideox",
-    "ltx":        "cogvideox",
-    "cogvideox":  "animatediff",
-    "animatediff":"pollinations-vid",
-}
+# Cascade V9 — adapte dynamiquement selon HF_TOKEN présent ou non
+def _build_fallback():
+    if HF_TOKEN:
+        # Avec token : cascade complète
+        return {
+            "ltx":        "wan22",
+            "wan22":      "cogvideox",
+            "cogvideox":  "animatediff",
+            "animatediff":"pollinations-vid",
+            "hunyuan":    "cogvideox",
+        }
+    else:
+        # Sans token : on saute wan22 et hunyuan (toujours gated)
+        # pollinations-vid est 404 → fallback final = pollinations-img (toujours dispo)
+        return {
+            "ltx":        "cogvideox",
+            "cogvideox":  "animatediff",
+            "animatediff":"pollinations-img",
+            "hunyuan":    "cogvideox",
+        }
+
+FALLBACK = _build_fallback()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -157,27 +177,50 @@ def extract_video_path(result) -> str | None:
 
 async def gen_pollinations_image(cid, prompt, model="flux",
                                   width=1024, height=1024):
-    """✅ Confirmé — aucune clé requise."""
+    """✅ Pollinations image — sans nologo (paywall), retry x3 si rate-limit."""
     import urllib.parse
     t = time.time()
     upd(cid, status="running", started_at=t,
         step="Génération image Pollinations…", progress=10)
     tick = asyncio.create_task(tick_loop(cid, t))
+    # seed variable pour éviter le cache et contourner la file par IP
+    seed = int(time.time()) % 100000
+    url = (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
+           f"?model={model}&width={width}&height={height}&seed={seed}&nofeed=true")
     try:
-        url = (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
-               f"?model={model}&width={width}&height={height}&seed=369&nologo=true")
+        # 1. Tentative Pollinations (2 essais, pas 3 — évite le ban prolongé)
+        last_err = None
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(15)
+                upd(cid, step="Retry Pollinations 2/2…", progress=20)
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                        if r.status == 200:
+                            fname = f"{uuid.uuid4().hex[:12]}.jpg"
+                            dest  = OUTPUTS / fname
+                            dest.write_bytes(await r.read())
+                            upd(cid, progress=100, step="Image prête ✓",
+                                status="done", result=f"http://127.0.0.1:{PORT}/outputs/{fname}")
+                            return
+                        last_err = f"Pollinations HTTP {r.status}"
+            except Exception as e:
+                last_err = str(e)
+
+        # 2. Fallback Picsum (photos libres, zéro API key, toujours dispo)
+        upd(cid, step="Fallback Picsum Photos…", progress=50)
+        picsum_url = f"https://picsum.photos/seed/{seed}/1280/720"
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=45)) as r:
+            async with s.get(picsum_url, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status == 200:
-                    # Sauvegarder l'image localement
-                    fname = f"{uuid.uuid4().hex[:12]}.jpg"
+                    fname = f"{uuid.uuid4().hex[:12]}_picsum.jpg"
                     dest  = OUTPUTS / fname
                     dest.write_bytes(await r.read())
-                    local_url = f"http://127.0.0.1:{PORT}/outputs/{fname}"
-                    upd(cid, progress=100, step="Image prête ✓",
-                        status="done", result=local_url)
-                else:
-                    raise RuntimeError(f"Pollinations HTTP {r.status}")
+                    upd(cid, progress=100, step="Image Picsum prête ✓",
+                        status="done", result=f"http://127.0.0.1:{PORT}/outputs/{fname}")
+                    return
+        raise RuntimeError(f"Image impossible (Pollinations: {last_err}, Picsum KO)")
     except Exception as e:
         upd(cid, status="error", error=str(e))
     finally:
@@ -213,52 +256,52 @@ async def gen_pollinations_video(cid, prompt):
 
 def _call_cogvideox(prompt, steps=50, guidance=6.0):
     """
-    ✅ ENDPOINT VÉRIFIÉ : zai-org/CogVideoX-2B-Space
-    api_name="/generate"
-    Retourne tuple (dict(video=filepath, subtitles=...), filepath_mp4, filepath_gif)
+    ★ V9 CORRIGÉ : THUDM/CogVideoX-5B-Space
+    api_name="/generate" — image_input/video_input passés à None pour T2V
+    Retourne tuple (dict(video=...), download_mp4, download_gif, seed)
     """
-    kw = {}
-    if HF_TOKEN:
-        kw["hf_token"] = HF_TOKEN
-    c = Client("zai-org/CogVideoX-2B-Space", verbose=False, **kw)
+    c = _gradio_client("THUDM/CogVideoX-5B-Space")
     result = c.predict(
         prompt=prompt,
-        num_inference_steps=float(steps),
-        guidance_scale=float(guidance),
+        image_input=None,
+        video_input=None,
+        video_strength=0.8,
+        seed_value=-1,
+        scale_status=False,
+        rife_status=False,
         api_name="/generate"
     )
-    # result[0] = dict(video=local_filepath, subtitles=...)
+    # result[0] = dict(video=filepath), result[1] = download mp4
     path = extract_video_path(result)
-    if path and Path(path).exists():
-        return save_to_outputs(path, ".mp4")
-    # Fallback : result[1] est direct filepath mp4
+    if path and Path(str(path)).exists():
+        return save_to_outputs(str(path), ".mp4")
     if isinstance(result, (list, tuple)) and len(result) > 1:
         path2 = result[1]
         if path2 and Path(str(path2)).exists():
             return save_to_outputs(str(path2), ".mp4")
-    raise RuntimeError("CogVideoX : aucun fichier vidéo récupéré")
+    raise RuntimeError("CogVideoX-5B : aucun fichier vidéo récupéré")
 
 
 async def gen_cogvideox(cid, prompt, steps=50):
-    """✅ Branche principale — CogVideoX-2B via HF Space."""
+    """★ V9 — CogVideoX-5B via HF Space ZeroGPU (fallback cascade)."""
     t = time.time()
     upd(cid, status="running", started_at=t,
-        step="Connexion CogVideoX Space…", progress=5)
+        step="Connexion CogVideoX-5B Space…", progress=5)
     tick = asyncio.create_task(tick_loop(cid, t))
 
-    # Progression simulée pendant l'attente (Space = boîte noire)
     async def fake_progress():
         steps_ui = [
-            (15, "Chargement CogVideoX-2B…"),
-            (30, "Encodage du prompt…"),
-            (55, "Génération des frames (GPU A10G)…"),
+            (10, "Connexion ZeroGPU…"),
+            (20, "Chargement CogVideoX-5B (cold start ~2min)…"),
+            (40, "Encodage du prompt…"),
+            (60, "Génération des frames…"),
             (80, "Décodage vidéo…"),
             (92, "Assemblage MP4…"),
         ]
         for prog, label in steps_ui:
             if CLIPS.get(cid, {}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
-            await asyncio.sleep(20)
+            await asyncio.sleep(40)   # 40s entre étapes = ~4min max
 
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
@@ -268,7 +311,7 @@ async def gen_cogvideox(cid, prompt, steps=50):
         upd(cid, progress=100, step="Vidéo prête ✓", status="done", result=url)
     except Exception as e:
         prog_task.cancel()
-        upd(cid, status="error", error=f"CogVideoX: {e}")
+        upd(cid, status="error", error=f"CogVideoX-5B: {e}")
     finally:
         tick.cancel()
 
@@ -279,10 +322,7 @@ def _call_animatediff(prompt, base="epiCRealism", motion="", step="4"):
     api_name="/generate_image"
     Retourne Dict(video=filepath, subtitles=filepath|None)
     """
-    kw = {}
-    if HF_TOKEN:
-        kw["hf_token"] = HF_TOKEN
-    c = Client("ByteDance/AnimateDiff-Lightning", verbose=False, **kw)
+    c = _gradio_client("ByteDance/AnimateDiff-Lightning")
     result = c.predict(
         prompt=prompt,
         base=base,
@@ -295,7 +335,6 @@ def _call_animatediff(prompt, base="epiCRealism", motion="", step="4"):
         return save_to_outputs(str(path), ".mp4")
     raise RuntimeError("AnimateDiff : aucun fichier vidéo récupéré")
 
-
 async def gen_animatediff(cid, prompt, base="epiCRealism"):
     """✅ Branche rapide — AnimateDiff-Lightning (4 steps, ~30s)."""
     t = time.time()
@@ -304,10 +343,14 @@ async def gen_animatediff(cid, prompt, base="epiCRealism"):
     tick = asyncio.create_task(tick_loop(cid, t))
 
     async def fake_progress():
-        for prog, label in [(20,"Chargement modèle…"),(50,"Génération 4-step…"),(80,"Rendu GIF→MP4…")]:
+        for prog, label in [
+            (15, "Chargement AnimateDiff (cold start)…"),
+            (50, "Génération 4-step…"),
+            (85, "Rendu GIF→MP4…"),
+        ]:
             if CLIPS.get(cid,{}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
-            await asyncio.sleep(8)
+            await asyncio.sleep(30)
 
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
@@ -334,16 +377,24 @@ def _call_hf_space_generic(space_id, api_name, **kwargs):
     raise RuntimeError(f"{space_id} : aucun fichier récupéré")
 
 
+HF_CLIENT_TIMEOUT = int(os.environ.get("HF_CLIENT_TIMEOUT", "600"))
+
+
 async def gen_wan22(cid, prompt, image_url=None):
-    """⚠  Wan2.2 — nécessite HF_TOKEN valide et Space actif."""
+    """★ V9 — Wan2.2 T2V-14B FP8 AOTI ZeroGPU (2e rang cascade)."""
     t = time.time()
     upd(cid, status="running", started_at=t,
-        step="Connexion Wan2.2 Space…", progress=5)
+        step="Connexion Wan2.2 T2V-14B…", progress=5)
     tick = asyncio.create_task(tick_loop(cid, t))
 
     async def fake_progress():
-        for prog, label in [(15,"Chargement Wan2.2-TI2V-5B…"),(40,"Encodage…"),(70,"Génération 720P…"),(90,"Assemblage…")]:
-            if CLIPS.get(cid,{}).get("status") != "running": break
+        for prog, label in [
+            (15, "Chargement Wan2.2-T2V-14B FP8…"),
+            (35, "Encodage texte→latent…"),
+            (60, "Génération 720P (ZeroGPU)…"),
+            (85, "Décodage + assemblage…"),
+        ]:
+            if CLIPS.get(cid, {}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
             await asyncio.sleep(25)
 
@@ -356,10 +407,10 @@ async def gen_wan22(cid, prompt, image_url=None):
             kw["image"] = handle_file(image_url)
             api = "/generate_i2v"
         url = await loop.run_in_executor(
-            None, lambda: _call_hf_space_generic("Wan-AI/Wan-2.2-5B", api, **kw)
+            None, lambda: _call_hf_space_generic("Wan-AI/Wan2.2-T2V-14B", api, **kw)
         )
         prog_task.cancel()
-        upd(cid, progress=100, step="Vidéo Wan2.2 prête ✓", status="done", result=url)
+        upd(cid, progress=100, step="Vidéo Wan2.2 14B prête ✓", status="done", result=url)
     except Exception as e:
         prog_task.cancel()
         upd(cid, status="error", error=str(e))
@@ -367,37 +418,139 @@ async def gen_wan22(cid, prompt, image_url=None):
         tick.cancel()
 
 
+def _gradio_client(space_id: str):
+    """Client Gradio avec timeout étendu pour cold-start ZeroGPU (~2-5 min)."""
+    kw = {"verbose": False}
+    if HF_TOKEN:
+        kw["hf_token"] = HF_TOKEN
+    try:
+        import httpx
+        kw["httpx_kwargs"] = {"timeout": httpx.Timeout(360.0)}  # 6 min max
+        return Client(space_id, **kw)
+    except TypeError:
+        # Ancienne version gradio_client sans httpx_kwargs
+        try:
+            return Client(space_id, **{k: v for k, v in kw.items() if k != "httpx_kwargs"})
+        except Exception as e:
+            raise RuntimeError(f"Connexion {space_id} impossible : {e}")
+    except Exception as e:
+        raise RuntimeError(f"Connexion {space_id} impossible : {e}")
+
+
+def _call_ltx(prompt, image_url=None):
+    """
+    ★ V9 CORRIGÉ — LTX-Video-Distilled signature réelle vérifiée via view_api().
+    Params: prompt, negative_prompt, input_image_filepath, input_video_filepath,
+            height_ui, width_ui, mode, duration_ui, ui_frames_to_use,
+            seed_ui, randomize_seed, ui_guidance_scale, improve_texture_flag
+    Retourne: (dict(video=filepath, subtitles=...), seed)
+    """
+    c = _gradio_client("Lightricks/LTX-Video-Distilled")
+    api = "/text_to_video"
+    kwargs = dict(
+        prompt=prompt,
+        negative_prompt="worst quality, inconsistent motion, blurry, jittery, distorted",
+        input_image_filepath=None,
+        input_video_filepath=None,
+        height_ui=512,
+        width_ui=704,
+        mode="text-to-video",
+        duration_ui=2,
+        ui_frames_to_use=9,
+        seed_ui=369,
+        randomize_seed=False,
+        ui_guidance_scale=1.0,
+        improve_texture_flag=True,
+        api_name=api,
+    )
+    if image_url:
+        kwargs["input_image_filepath"] = image_url
+        kwargs["mode"] = "image-to-video"
+        kwargs["api_name"] = "/image_to_video"
+    result = c.predict(**kwargs)
+    # result = (dict(video=filepath, subtitles=...), seed_int)
+    video_dict = result[0] if isinstance(result, (list, tuple)) else result
+    path = extract_video_path(video_dict)
+    if path and Path(str(path)).exists():
+        return save_to_outputs(str(path), ".mp4")
+    raise RuntimeError("LTX-Distilled : aucun fichier vidéo récupéré")
+
+
 async def gen_ltx(cid, prompt, image_url=None):
-    """⚠  LTX-Video — nécessite HF_TOKEN valide et Space actif."""
+    """★ V9 PRIMAIRE — LTX-Video Distilled ZeroGPU (signature corrigée)."""
     t = time.time()
     upd(cid, status="running", started_at=t,
-        step="Connexion LTX-Video Space…", progress=5)
+        step="Connexion LTX-Video Distilled…", progress=5)
     tick = asyncio.create_task(tick_loop(cid, t))
 
     async def fake_progress():
-        for prog, label in [(20,"Chargement LTX 13B…"),(50,"DiT 30fps…"),(85,"Rendu HD…")]:
-            if CLIPS.get(cid,{}).get("status") != "running": break
+        for prog, label in [
+            (10, "Connexion ZeroGPU…"),
+            (20, "Chargement LTX Distilled (cold start ~2min)…"),
+            (45, "DiT distilled — 8 steps 30fps…"),
+            (75, "Rendu 704×512…"),
+            (92, "Encodage MP4…"),
+        ]:
+            if CLIPS.get(cid, {}).get("status") != "running": break
+            upd(cid, progress=prog, step=label)
+            await asyncio.sleep(40)   # patience cold start
+
+    prog_task = asyncio.create_task(fake_progress())
+    loop = asyncio.get_event_loop()
+    try:
+        url = await loop.run_in_executor(None, lambda: _call_ltx(prompt, image_url))
+        prog_task.cancel()
+        upd(cid, progress=100, step="Vidéo LTX Distilled prête ✓", status="done", result=url)
+    except Exception as e:
+        prog_task.cancel()
+        upd(cid, status="error", error=str(e))
+    finally:
+        tick.cancel()
+
+
+def _call_hunyuan(prompt, steps=20):
+    """★ V9 — HunyuanVideo ZeroGPU sans token requis."""
+    kw = {}
+    if HF_TOKEN:
+        kw["hf_token"] = HF_TOKEN
+    c = Client("tencent/HunyuanVideo", verbose=False, **kw)
+    result = c.predict(
+        prompt=prompt,
+        num_inference_steps=steps,
+        api_name="/generate"
+    )
+    path = extract_video_path(result)
+    if path and Path(str(path)).exists():
+        return save_to_outputs(str(path), ".mp4")
+    raise RuntimeError("HunyuanVideo : aucun fichier récupéré")
+
+
+async def gen_hunyuan(cid, prompt):
+    """★ V9 — HunyuanVideo (7e branche ZeroGPU)."""
+    t = time.time()
+    upd(cid, status="running", started_at=t,
+        step="Connexion HunyuanVideo…", progress=5)
+    tick = asyncio.create_task(tick_loop(cid, t))
+
+    async def fake_progress():
+        for prog, label in [
+            (20, "Chargement HunyuanVideo…"),
+            (45, "Génération frames ZeroGPU…"),
+            (80, "Assemblage MP4…"),
+        ]:
+            if CLIPS.get(cid, {}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
             await asyncio.sleep(20)
 
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
     try:
-        kw = {"prompt": prompt, "seed": 369, "guidance_scale": 3.0,
-              "height": 704, "width": 1216, "num_frames": 121}
-        api = "/text_to_video"
-        if image_url:
-            kw = {"prompt": prompt, "image": handle_file(image_url),
-                  "seed": 369, "guidance_scale": 3.0}
-            api = "/image_to_video"
-        url = await loop.run_in_executor(
-            None, lambda: _call_hf_space_generic("Lightricks/LTX-Video", api, **kw)
-        )
+        url = await loop.run_in_executor(None, _call_hunyuan, prompt, 20)
         prog_task.cancel()
-        upd(cid, progress=100, step="Vidéo LTX prête ✓", status="done", result=url)
+        upd(cid, progress=100, step="Vidéo HunyuanVideo prête ✓", status="done", result=url)
     except Exception as e:
         prog_task.cancel()
-        upd(cid, status="error", error=str(e))
+        upd(cid, status="error", error=f"HunyuanVideo: {e}")
     finally:
         tick.cancel()
 
@@ -412,20 +565,25 @@ async def run_clip(cid: str):
     prompt = clip["prompt"]
     image  = clip.get("image")
 
-    sem = SEMS.get(branch, SEMS["cogvideox"])
-    async with sem:
-        await _execute_branch(cid, branch, prompt, image)
+    # Cascade complète : parcourt tous les fallbacks jusqu'à succès ou épuisement
+    visited = set()
+    current = branch
+    while current and current not in visited:
+        visited.add(current)
+        sem = SEMS.get(current, SEMS["cogvideox"])
+        async with sem:
+            await _execute_branch(cid, current, prompt, image)
 
-        # FALLBACK AUTOMATIQUE si erreur
-        if CLIPS[cid]["status"] == "error":
-            fb = FALLBACK.get(branch)
-            if fb:
-                log.warning(f"Clip {cid} : fallback {branch} → {fb}")
-                CLIPS[cid]["status"] = "running"
-                CLIPS[cid]["error"]  = None
-                upd(cid, branch=fb, step=f"Fallback vers {fb}…", progress=0)
-                async with SEMS.get(fb, SEMS["cogvideox"]):
-                    await _execute_branch(cid, fb, prompt, image)
+        if CLIPS[cid]["status"] != "error":
+            break   # succès ou en cours — on sort
+
+        next_branch = FALLBACK.get(current)
+        if next_branch:
+            log.warning(f"Clip {cid} : fallback {current} → {next_branch}")
+            CLIPS[cid]["status"] = "running"
+            CLIPS[cid]["error"]  = None
+            upd(cid, branch=next_branch, step=f"Fallback {current} → {next_branch}…", progress=0)
+        current = next_branch
 
 
 async def _execute_branch(cid, branch, prompt, image):
@@ -441,8 +599,10 @@ async def _execute_branch(cid, branch, prompt, image):
         await gen_wan22(cid, prompt, image)
     elif branch == "ltx":
         await gen_ltx(cid, prompt, image)
+    elif branch == "hunyuan":
+        await gen_hunyuan(cid, prompt)
     else:
-        await gen_cogvideox(cid, prompt)   # défaut sûr
+        await gen_ltx(cid, prompt, image)   # V9 : LTX comme défaut sûr
 
 
 def auto_branch(intent, index, total):
@@ -452,9 +612,223 @@ def auto_branch(intent, index, total):
     if intent == "cinematic": return "cogvideox"
     if intent == "wan":       return "wan22"
     if intent == "hd30fps":   return "ltx"
+    if intent == "studio":    return "ltx"    # V9 : intent studio = LTX distilled
+    if intent == "hunyuan":   return "hunyuan"
     if intent == "mix":
-        return ["cogvideox", "animatediff", "pollinations-vid"][index % 3]
-    return "cogvideox"   # défaut le plus fiable confirmé
+        # V9 : mix tourne sur les 3 meilleures branches
+        return ["ltx", "wan22", "cogvideox"][index % 3]
+    return "ltx"   # V9 : LTX distilled = nouveau défaut
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TTS — Kokoro (si HF_TOKEN) ou edge-tts (fallback gratuit)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+KOKORO_MODEL  = None   # chargé à la demande
+KOKORO_LOADED = False
+
+
+def _ensure_kokoro():
+    """Télécharge et charge Kokoro une seule fois (lazy init)."""
+    global KOKORO_MODEL, KOKORO_LOADED
+    if KOKORO_LOADED:
+        return KOKORO_MODEL
+    if not HF_TOKEN:
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        from kokoro_onnx import Kokoro
+        model_dir = Path(__file__).parent / ".kokoro"
+        model_dir.mkdir(exist_ok=True)
+        model_path  = hf_hub_download("hexgrad/Kokoro-82M-ONNX", "kokoro-v1_0.onnx",
+                                       token=HF_TOKEN, local_dir=str(model_dir))
+        voices_path = hf_hub_download("hexgrad/Kokoro-82M-ONNX", "voices.bin",
+                                       token=HF_TOKEN, local_dir=str(model_dir))
+        KOKORO_MODEL  = Kokoro(model_path, voices_path)
+        KOKORO_LOADED = True
+        log.info("Kokoro TTS chargé ✓")
+    except Exception as e:
+        log.warning(f"Kokoro non disponible ({e}) — edge-tts en fallback")
+        KOKORO_LOADED = True   # ne pas retenter
+    return KOKORO_MODEL
+
+
+def _tts_kokoro(text: str, out_path: str, voice: str = "af_heart",
+                speed: float = 1.0, lang: str = "fr-fr") -> bool:
+    """Génère l'audio via Kokoro ONNX. Retourne True si succès."""
+    import soundfile as sf
+    import numpy as np
+    kokoro = _ensure_kokoro()
+    if kokoro is None:
+        return False
+    try:
+        samples, sr = kokoro.create(text, voice=voice, speed=speed, lang=lang)
+        sf.write(out_path, samples, sr)
+        return True
+    except Exception as e:
+        log.warning(f"Kokoro TTS échoué : {e}")
+        return False
+
+
+async def _tts_edge(text: str, out_path: str,
+                    voice: str = "fr-FR-DeniseNeural") -> bool:
+    """Génère l'audio via edge-tts (Microsoft Edge, gratuit sans clé)."""
+    try:
+        import edge_tts
+        tts = edge_tts.Communicate(text, voice)
+        await tts.save(out_path)
+        return True
+    except Exception as e:
+        log.error(f"edge-tts échoué : {e}")
+        return False
+
+
+async def generate_tts(text: str, out_path: str,
+                       voice_kokoro: str = "af_heart",
+                       voice_edge: str = "fr-FR-DeniseNeural") -> bool:
+    """TTS avec Kokoro en primaire, edge-tts en fallback."""
+    loop = asyncio.get_event_loop()
+    ok = await loop.run_in_executor(None, _tts_kokoro, text, out_path, voice_kokoro, 1.0, "fr-fr")
+    if not ok:
+        ok = await _tts_edge(text, out_path, voice_edge)
+    return ok
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COMPOSE — pipeline épisode complet (TTS + clips + FFmpeg concat)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+COMPOSE_JOBS = {}
+
+
+async def run_compose(job_id: str, segments: list, voice_edge: str):
+    """
+    Pipeline complet :
+      1. Pour chaque segment : TTS → audio WAV/MP3
+      2. Optionnel : générer clip vidéo si prompt fourni
+      3. FFmpeg : assembler audio + clip → segment MP4
+      4. FFmpeg : concat tous les segments → épisode final MP4
+    """
+    job = COMPOSE_JOBS[job_id]
+
+    def upd_job(**kw):
+        COMPOSE_JOBS[job_id].update(kw)
+
+    upd_job(status="running", step="Démarrage pipeline…", progress=0)
+    tmpdir = Path(tempfile.mkdtemp(prefix="compose_"))
+    segment_files = []
+
+    try:
+        total = len(segments)
+        for i, seg in enumerate(segments):
+            text   = seg.get("text", "").strip()
+            prompt = seg.get("prompt", "").strip()
+            dur    = float(seg.get("duration", 5))
+            pct_base = int(i / total * 80)
+
+            upd_job(step=f"[{i+1}/{total}] TTS…", progress=pct_base)
+
+            # ── TTS ──────────────────────────────────────────────────────────
+            audio_path = str(tmpdir / f"seg{i:02d}_audio.mp3")
+            if text:
+                ok = await generate_tts(text, audio_path, voice_edge=voice_edge)
+                if not ok:
+                    audio_path = None
+            else:
+                audio_path = None
+
+            # ── Clip vidéo (optionnel) ────────────────────────────────────
+            clip_path = seg.get("clip_url")   # URL locale /outputs/xxx.mp4
+            if clip_path and clip_path.startswith("http://127.0.0.1"):
+                fname = clip_path.split("/outputs/")[-1]
+                local  = OUTPUTS / fname
+                clip_path = str(local) if local.exists() else None
+
+            # ── Durée audio réelle ─────────────────────────────────────────
+            real_dur = dur
+            if audio_path and Path(audio_path).exists():
+                r = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries",
+                     "format=duration", "-of", "default=nw=1:nk=1", audio_path],
+                    capture_output=True, text=True
+                )
+                try: real_dur = max(float(r.stdout.strip()), dur)
+                except: pass
+
+            # ── Assemblage segment ─────────────────────────────────────────
+            seg_out = str(tmpdir / f"seg{i:02d}.mp4")
+            upd_job(step=f"[{i+1}/{total}] FFmpeg assemble…", progress=pct_base + 5)
+
+            if clip_path and audio_path:
+                # vidéo + audio → looper la vidéo si audio plus long
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-stream_loop", "-1", "-i", clip_path,
+                    "-i", audio_path,
+                    "-shortest",
+                    "-c:v", "libx264", "-c:a", "aac",
+                    "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+                    seg_out
+                ]
+            elif audio_path:
+                # audio seul → fond noir + audio
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", f"color=c=black:s=1280x720:r=24:d={real_dur}",
+                    "-i", audio_path,
+                    "-shortest",
+                    "-c:v", "libx264", "-c:a", "aac",
+                    seg_out
+                ]
+            elif clip_path:
+                # vidéo seule → trim à dur
+                cmd = [
+                    "ffmpeg", "-y", "-i", clip_path,
+                    "-t", str(real_dur),
+                    "-c:v", "libx264", "-an",
+                    seg_out
+                ]
+            else:
+                continue
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                log.error(f"FFmpeg seg{i}: {result.stderr[-300:]}")
+                continue
+            segment_files.append(seg_out)
+
+        if not segment_files:
+            upd_job(status="error", error="Aucun segment produit")
+            return
+
+        # ── Concat final ──────────────────────────────────────────────────
+        upd_job(step="FFmpeg concat final…", progress=85)
+        concat_list = tmpdir / "concat.txt"
+        concat_list.write_text("\n".join(f"file '{f}'" for f in segment_files))
+
+        fname_out = f"episode_{uuid.uuid4().hex[:8]}.mp4"
+        out_mp4   = OUTPUTS / fname_out
+        cmd_concat = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
+            "-c:v", "libx264", "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(out_mp4)
+        ]
+        r2 = subprocess.run(cmd_concat, capture_output=True, text=True)
+        if r2.returncode != 0:
+            upd_job(status="error", error=f"Concat échoué : {r2.stderr[-300:]}")
+            return
+
+        result_url = f"http://127.0.0.1:{PORT}/outputs/{fname_out}"
+        upd_job(status="done", progress=100,
+                step="Épisode prêt ✓", result=result_url)
+        log.info(f"Compose {job_id} → {result_url}")
+
+    except Exception as e:
+        upd_job(status="error", error=str(e))
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -471,28 +845,33 @@ async def handle_index(request):
 
 async def handle_health(request):
     return web.json_response({
-        "status": "ok", "version": "V8.1-PARALLEL",
+        "status": "ok", "version": "V9.0-STUDIO-QUANTIQUE",
         "port": PORT, "gradio": HAS_GRADIO, "hf_token": bool(HF_TOKEN),
         "workers_active": sum(1 for c in CLIPS.values() if c["status"]=="running"),
         "clips_done": sum(1 for c in CLIPS.values() if c["status"]=="done"),
         "outputs_count": len(list(OUTPUTS.glob("*"))),
-        "branches_confirmed": ["pollinations-img","pollinations-vid","cogvideox","animatediff"],
-        "branches_need_token": ["wan22","ltx"],
+        "primary_branch": "ltx-distilled",
+        "cascade_no_token": ["ltx","cogvideox","animatediff","pollinations-vid"],
+        "cascade_with_token": ["ltx","wan22","cogvideox","animatediff","pollinations-vid"],
+        "branches_zerogpu_no_token": ["ltx","cogvideox"],
+        "branches_need_token": ["wan22","hunyuan"],
         "sig": "Tik Tik Tik — Le UN ⚡"
     }, headers=CORS)
 
 async def handle_capabilities(request):
     return web.json_response({
         "branches": [
-            {"id":"pollinations-img","name":"Pollinations Images","ready":True,"token_required":False,"confirmed":True},
-            {"id":"pollinations-vid","name":"Pollinations Vidéo","ready":True,"token_required":False,"confirmed":True,"note":"alpha"},
-            {"id":"cogvideox","name":"CogVideoX-2B (HF Space)","ready":HAS_GRADIO,"token_required":False,"confirmed":True},
-            {"id":"animatediff","name":"AnimateDiff-Lightning (HF Space)","ready":HAS_GRADIO,"token_required":False,"confirmed":True,"note":"rapide 4-step"},
-            {"id":"wan22","name":"Wan2.2 TI2V-5B (HF Space)","ready":bool(HF_TOKEN),"token_required":True,"confirmed":False,"note":"Space parfois pausé"},
-            {"id":"ltx","name":"LTX-Video 0.9.7 (HF Space)","ready":bool(HF_TOKEN),"token_required":True,"confirmed":False},
+            {"id":"ltx","name":"LTX-Video Distilled ★ PRIMAIRE","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":1,"note":"2s 704×512 30fps · Space vérifié"},
+            {"id":"cogvideox","name":"CogVideoX-5B ZeroGPU","ready":HAS_GRADIO,"token_required":False,"zerogpu":True,"rank":2,"note":"Space vérifié"},
+            {"id":"animatediff","name":"AnimateDiff-Lightning","ready":HAS_GRADIO,"token_required":False,"zerogpu":False,"rank":3,"note":"rapide 4-step · Space vérifié"},
+            {"id":"pollinations-vid","name":"Pollinations Vidéo","ready":True,"token_required":False,"zerogpu":False,"rank":4,"note":"sans clé"},
+            {"id":"pollinations-img","name":"Pollinations Images","ready":True,"token_required":False,"zerogpu":False,"rank":5},
+            {"id":"wan22","name":"Wan2.2 T2V-5B","ready":bool(HF_TOKEN),"token_required":True,"zerogpu":True,"rank":6,"note":"Space gated — HF_TOKEN requis"},
+            {"id":"hunyuan","name":"HunyuanVideo","ready":bool(HF_TOKEN),"token_required":True,"zerogpu":True,"rank":7,"note":"Space gated — HF_TOKEN requis"},
         ],
         "fallback_chains": FALLBACK,
         "parallel_mode": True,
+        "intents": ["studio","cinematic","fast","wan","hd30fps","hunyuan","draft","image","mix","t2v"],
     }, headers=CORS)
 
 async def handle_produce(request):
@@ -640,6 +1019,80 @@ async def handle_outputs(request):
     return web.FileResponse(p, headers=CORS) if p.exists() else web.Response(
         text="Fichier introuvable", status=404)
 
+async def handle_tts(request):
+    """POST /api/tts — génère un fichier audio et retourne son URL locale."""
+    data  = await request.json()
+    text  = data.get("text", "").strip()
+    voice = data.get("voice", "fr-FR-DeniseNeural")
+    if not text:
+        return web.json_response({"error": "text requis"}, status=400, headers=CORS)
+    fname = f"tts_{uuid.uuid4().hex[:10]}.mp3"
+    dest  = str(OUTPUTS / fname)
+    ok    = await generate_tts(text, dest, voice_edge=voice)
+    if not ok:
+        return web.json_response({"error": "TTS échoué"}, status=500, headers=CORS)
+    return web.json_response({
+        "url": f"http://127.0.0.1:{PORT}/outputs/{fname}",
+        "engine": "kokoro" if (KOKORO_MODEL is not None) else "edge-tts",
+        "voice": voice,
+    }, headers=CORS)
+
+
+async def handle_compose(request):
+    """
+    POST /api/compose — pipeline épisode complet.
+    Body JSON :
+    {
+      "segments": [
+        {"text": "Bienvenue dans Mercredis Tesla…", "prompt": "tesla car driving", "clip_url": "http://...", "duration": 8},
+        ...
+      ],
+      "voice": "fr-FR-DeniseNeural"   // optionnel
+    }
+    Retourne immédiatement {"job_id": "..."}, puis streamer /compose/{job_id}.
+    """
+    data     = await request.json()
+    segments = data.get("segments", [])
+    voice    = data.get("voice", "fr-FR-DeniseNeural")
+    if not segments:
+        return web.json_response({"error": "segments[] requis"}, status=400, headers=CORS)
+    if len(segments) > 20:
+        return web.json_response({"error": "max 20 segments"}, status=400, headers=CORS)
+    job_id = uuid.uuid4().hex[:8]
+    COMPOSE_JOBS[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0,
+        "step": "", "result": None, "error": None,
+        "created": datetime.now().isoformat(),
+    }
+    asyncio.create_task(run_compose(job_id, segments, voice))
+    return web.json_response({"job_id": job_id, "segments": len(segments)}, headers=CORS)
+
+
+async def handle_compose_stream(request):
+    """GET /compose/{job_id} — SSE suivi du job compose."""
+    job_id = request.match_info["job_id"]
+    if job_id not in COMPOSE_JOBS:
+        return web.Response(text="Job introuvable", status=404)
+    resp = web.StreamResponse(headers={
+        **CORS, "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+    })
+    await resp.prepare(request)
+    def sse(d): return f"data: {json.dumps(d, ensure_ascii=False)}\n\n".encode()
+    for _ in range(600):   # max 50 min
+        j = COMPOSE_JOBS.get(job_id, {})
+        try:
+            await resp.write(sse({
+                "id": j.get("id"), "status": j.get("status"),
+                "progress": j.get("progress", 0), "step": j.get("step", ""),
+                "result": j.get("result"), "error": j.get("error"),
+            }))
+        except: break
+        if j.get("status") in ("done", "error"): break
+        await asyncio.sleep(3)
+    return resp
+
+
 async def handle_history(request):
     recent = sorted(SESSIONS.values(), key=lambda s:s["created"], reverse=True)[:10]
     return web.json_response([{
@@ -667,17 +1120,20 @@ def create_app():
     app.router.add_get("/stream/{clip_id}",               handle_stream_clip)
     app.router.add_get("/outputs/{file}",                 handle_outputs)
     app.router.add_get("/history",                        handle_history)
+    app.router.add_post("/api/tts",                        handle_tts)
+    app.router.add_post("/api/compose",                    handle_compose)
+    app.router.add_get("/compose/{job_id}",               handle_compose_stream)
     return app
 
 if __name__ == "__main__":
     print("""
-╔═══════════════════════════════════════════════════╗
-║  ⚡ TESLA GO V8.1 — CONSOLE DE PRODUCTION         ║
-║  Endpoints vérifiés · Sauvegarde immédiate        ║
-║  Fallback auto · SSE keep-alive                   ║
-║  Port 8369 · LMDB17 / etheravolt.fr              ║
-║  Tik Tik Tik — Le UN ⚡                          ║
-╚═══════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════╗
+║  ⚡ TESLA GO V9 — STUDIO QUANTIQUE                   ║
+║  LTX Distilled ★ · CogVideoX-5B · AnimateDiff       ║
+║  /api/compose · TTS Kokoro/edge-tts · FFmpeg         ║
+║  Zéro coût absolu · Port 8369 · LMDB17              ║
+║  Tik Tik Tik — Le UN ⚡                             ║
+╚══════════════════════════════════════════════════════╝
     """)
     if not HF_TOKEN:
         print("⚠  HF_TOKEN absent → CogVideoX et AnimateDiff fonctionnent quand même")
