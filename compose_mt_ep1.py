@@ -72,7 +72,6 @@ d = json.loads(urllib.request.urlopen(req).read())
 job_id = d["job_id"]
 print(f"✅ Job compose lancé : {job_id}\n")
 
-# Stream progression
 url = BASE + "/compose/" + job_id
 prev = ""
 for raw in urllib.request.urlopen(url):
