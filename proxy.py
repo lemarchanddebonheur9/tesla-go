@@ -198,42 +198,42 @@ async def gen_pollinations_image(cid, prompt, model="flux",
 
 
 async def gen_pollinations_video(cid, prompt):
-    """✅ Alpha — Seedance gratuit via Pollinations."""
+    """
+    T2V via ali-vilab/text-to-video-ms-1.7b (HF Space).
+    Remplace gen.pollinations.ai/v1/video qui a été supprimé.
+    """
     t = time.time()
     upd(cid, status="running", started_at=t,
-        step="Envoi vers Pollinations Vidéo…", progress=5)
+        step="Connexion Text-to-Video Space…", progress=5)
     tick = asyncio.create_task(tick_loop(cid, t))
+
+    async def fake_progress():
+        for prog, label in [(20,"Chargement modèle T2V…"),(50,"Génération frames…"),(80,"Assemblage vidéo…")]:
+            if CLIPS.get(cid, {}).get("status") != "running": break
+            upd(cid, progress=prog, step=label)
+            await asyncio.sleep(10)
+
+    prog_task = asyncio.create_task(fake_progress())
+    loop = asyncio.get_event_loop()
+
+    def _call_t2v():
+        kw = {}
+        if HF_TOKEN:
+            kw["hf_token"] = HF_TOKEN
+        c = Client("ali-vilab/text-to-video-ms-1.7b", verbose=False, **kw)
+        result = c.predict(prompt=prompt, api_name="/predict")
+        path = result if isinstance(result, str) else (result[0] if isinstance(result, (list, tuple)) else None)
+        if path and Path(str(path)).exists():
+            return save_to_outputs(str(path), ".mp4")
+        raise RuntimeError("T2V: aucun fichier vidéo récupéré")
+
     try:
-        upd(cid, progress=20, step="Génération Seedance en cours…")
-        async with aiohttp.ClientSession() as s:
-            async with s.post(
-                "https://gen.pollinations.ai/v1/video",
-                json={"prompt": prompt, "model": "seedance", "ratio": "16:9"},
-                timeout=aiohttp.ClientTimeout(total=240)
-            ) as r:
-                upd(cid, progress=80, step="Finalisation vidéo…")
-                if r.status == 200:
-                    data = await r.json()
-                    video_url = data.get("url")
-                    if video_url:
-                        # Download and save locally
-                        async with s.get(video_url, timeout=aiohttp.ClientTimeout(total=120)) as vr:
-                            if vr.status == 200:
-                                fname = f"{uuid.uuid4().hex[:12]}.mp4"
-                                dest = OUTPUTS / fname
-                                dest.write_bytes(await vr.read())
-                                local_url = f"http://127.0.0.1:{PORT}/outputs/{fname}"
-                                upd(cid, progress=100, step="Vidéo prête ✓",
-                                    status="done", result=local_url)
-                            else:
-                                upd(cid, progress=100, step="Vidéo prête ✓",
-                                    status="done", result=video_url)  # fallback: external URL
-                    else:
-                        raise RuntimeError("Pollinations vidéo: URL manquante dans la réponse")
-                else:
-                    raise RuntimeError(f"Pollinations vidéo HTTP {r.status}")
+        url = await loop.run_in_executor(None, _call_t2v)
+        prog_task.cancel()
+        upd(cid, progress=100, step="Vidéo prête ✓", status="done", result=url)
     except Exception as e:
-        upd(cid, status="error", error=str(e))
+        prog_task.cancel()
+        upd(cid, status="error", error=f"T2V: {e}")
     finally:
         tick.cancel()
 
