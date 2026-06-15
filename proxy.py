@@ -238,7 +238,7 @@ async def gen_pollinations_video(cid, prompt):
         tick.cancel()
 
 
-def _call_cogvideox(prompt, steps=50, guidance=6.0):
+def _call_cogvideox(prompt, steps=25, guidance=6.0):
     """
     ✅ ENDPOINT VÉRIFIÉ : zai-org/CogVideoX-2B-Space
     api_name="/generate"
@@ -266,7 +266,7 @@ def _call_cogvideox(prompt, steps=50, guidance=6.0):
     raise RuntimeError("CogVideoX : aucun fichier vidéo récupéré")
 
 
-async def gen_cogvideox(cid, prompt, steps=50):
+async def gen_cogvideox(cid, prompt, steps=25):
     """✅ Branche principale — CogVideoX-2B via HF Space."""
     t = time.time()
     upd(cid, status="running", started_at=t,
@@ -285,7 +285,7 @@ async def gen_cogvideox(cid, prompt, steps=50):
         for prog, label in steps_ui:
             if CLIPS.get(cid, {}).get("status") != "running": break
             upd(cid, progress=prog, step=label)
-            await asyncio.sleep(20)
+            await asyncio.sleep(12)   # ~25 steps ≈ 60-90s total
 
     prog_task = asyncio.create_task(fake_progress())
     loop = asyncio.get_event_loop()
